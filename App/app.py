@@ -8,16 +8,15 @@ import cv2, pywt, tensorflow as tf
 from PIL import Image
 from skimage.feature import local_binary_pattern as sk_lbp
 
-# ----------------- App Config -----------------
+# ----------------- CONFIG -----------------
 APP_TITLE = "🕵️‍♂️ TraceFinder - Forensic Scanner Identification"
 IMG_SIZE = (256, 256)
 PATCH = 128
 STRIDE = 64
 MAX_PATCHES = 16
 
-# Update this to your model folder
-BASE_DIR = Path(r"C:\AI Trace Finder\App\models")  # Your model path
-ART_SCN = BASE_DIR
+# Point to your local model folder
+ART_SCN = Path(r"C:\AI Trace Finder\App\models")
 ART_IMG = ART_SCN
 ART_PAIR = ART_SCN / "artifacts_tamper_pair"
 TAMP_ROOT = ART_SCN / "Tampered images"
@@ -25,7 +24,7 @@ TAMP_ROOT = ART_SCN / "Tampered images"
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.markdown(f"<h2 style='margin-top:0'>{APP_TITLE}</h2>", unsafe_allow_html=True)
 
-# ----------------- Image utils -----------------
+# ----------------- Image Utilities -----------------
 def decode_upload_to_bgr(uploaded):
     try: uploaded.seek(0)
     except Exception: pass
@@ -80,7 +79,45 @@ def fft_radial_energy(img, K=6):
         m=(r>=bins[i])&(r<bins[i+1]); feats.append(float(mag[m].mean() if m.any() else 0.0))
     return np.asarray(feats, dtype=np.float32)
 
-# ----------------- Scanner-ID: model-driven lock -----------------
+# ----------------- Scanner Model -----------------
+def load_any_hybrid():
+    for p in [ART_SCN/"scanner_hybrid_14.keras", ART_SCN/"scanner_hybrid.keras",
+              ART_SCN/"scanner_hybrid.h5", ART_SCN/"scanner_hybrid"]:
+        if p.exists(): return tf.keras.models.load_model(str(p)), p.name
+    return None, None
+
+hyb_model, model_file = load_any_hybrid()
+scanner_ready = hyb_model is not None
+scanner_err = None if scanner_ready else "No scanner_hybrid model found."
+
+required_tab_feats = None
+if scanner_ready:
+    try:
+        required_tab_feats = int(hyb_model.inputs[1].shape[-1])
+    except Exception:
+        scanner_ready = False
+        scanner_err = "Hybrid model missing second input."
+
+def must_pick_label_encoder():
+    for lep in [ART_SCN/"hybrid_label_encoder.pkl", ART_SCN/"hybrid_label_encoder (1).pkl"]:
+        if lep.exists():
+            with open(lep,"rb") as f: return pickle.load(f)
+    raise FileNotFoundError("hybrid_label_encoder.pkl not found")
+
+# ----------------- Lock artifacts -----------------
+if scanner_ready:
+    try:
+        le_sc = must_pick_label_encoder()
+        scanner_fps = pickle.load(open(ART_SCN/"scannerfingerprints.pkl","rb"))
+        fp_keys = np.load(ART_SCN/"fp_keys.npy", allow_pickle=True).tolist()
+        sc_sc = pickle.load(open(ART_SCN/"hybrid_feat_scaler.pkl","rb"))
+        if len(fp_keys)+6+10 != required_tab_feats:
+            scanner_ready=False
+            scanner_err=f"Feature mismatch: required {required_tab_feats}, got {len(fp_keys)+16}"
+    except Exception as e:
+        scanner_ready=False
+        scanner_err=str(e)
+
 def corr2d(a,b):
     a=a.astype(np.float32).ravel(); b=b.astype(np.float32).ravel()
     a-=a.mean(); b-=b.mean()
@@ -96,126 +133,49 @@ def make_scanner_feats(res):
 
 def try_scanner_predict(residual):
     if not scanner_ready:
-        if scanner_err: st.info(f"Scanner-ID disabled: {scanner_err}")
+        if scanner_err: st.info(f"🖨️ Scanner disabled: {scanner_err}")
         return "Unknown", 0.0
     x_img=np.expand_dims(residual,axis=(0,-1))
-    x_ft =make_scanner_feats(residual)
+    x_ft = make_scanner_feats(residual)
     ps=hyb_model.predict([x_img,x_ft],verbose=0).ravel()
     idx=int(np.argmax(ps))
     return str(le_sc.classes_[idx]), float(ps[idx]*100.0)
 
-def must_pick_label_encoder():
-    for lep in [ART_SCN/"hybrid_label_encoder.pkl", ART_SCN/"hybrid_label_encoder (1).pkl"]:
-        if lep.exists():
-            with open(lep,"rb") as f: return pickle.load(f)
-    raise FileNotFoundError("hybrid_label_encoder.pkl not found")
-
-def lock_scanner_artifacts_by_required(required_feats: int):
-    sc = pickle.load(open(ART_SCN/"hybrid_feat_scaler.pkl","rb"))
-    candidates = [
-        (ART_SCN/"scanner_fingerprints_14.pkl", ART_SCN/"fp_keys_14.npy", "14"),
-        (ART_SCN/"scanner_fingerprints.pkl",    ART_SCN/"fp_keys.npy",    "legacy"),
-    ]
-    for fps_path, keys_path, tag in candidates:
-        if not fps_path.exists() or not keys_path.exists(): continue
-        with open(fps_path,"rb") as f: fps = pickle.load(f)
-        keys = np.load(keys_path, allow_pickle=True).tolist()
-        if len(keys) + 6 + 10 == required_feats and getattr(sc,"n_features_in_",None) == required_feats:
-            return dict(fps=fps, keys=keys, scaler=sc, tag=tag)
-    raise RuntimeError(f"No fingerprint/keys set matches required feature size {required_feats} and scaler.")
-
-# Load hybrid model
-def load_any_hybrid():
-    for p in [ART_SCN/"scanner_hybrid_14.keras", ART_SCN/"scanner_hybrid.keras", ART_SCN/"scanner_hybrid.h5", ART_SCN/"scanner_hybrid"]:
-        if p.exists(): return tf.keras.models.load_model(str(p)), p.name
-    return None, None
-
-hyb_model, model_file = load_any_hybrid()
-scanner_ready = hyb_model is not None
-scanner_err = None if scanner_ready else "No scanner_hybrid model found"
-
-required_tab_feats = None
-if scanner_ready:
-    try: required_tab_feats = int(hyb_model.inputs[1].shape[-1])
-    except Exception:
-        scanner_ready=False
-        scanner_err="Hybrid model missing second input; need [image, features] inputs."
-
-if scanner_ready:
-    try:
-        le_sc = must_pick_label_encoder()
-        locked = lock_scanner_artifacts_by_required(required_tab_feats)
-        scanner_fps, fp_keys, sc_sc, stack_tag = locked["fps"], locked["keys"], locked["scaler"], locked["tag"]
-        st.caption(f"🔒 Scanner stack locked: model={model_file}, tag={stack_tag}, feats={required_tab_feats}")
-    except Exception as e:
-        scanner_ready=False
-        scanner_err=str(e)
-
-# ----------------- Tamper Image -----------------
-tamper_image_ok=True
-try:
-    sc_img=pickle.load(open(ART_IMG/"image_scaler.pkl","rb"))
-    clf_img=pickle.load(open(ART_IMG/"image_svm_sig.pkl","rb"))
-    thrp = ART_IMG/"image_thresholds.json"
-    if not thrp.exists(): thrp = ART_IMG/"image_thresholds"
-    THR_IMG=json.load(open(thrp,"r"))
-except Exception as e:
-    tamper_image_ok=False
-    st.info(f"Tamper (image-level) disabled: {e}")
-
-def image_feat_mean(res):
-    patches = extract_patches(res, limit=MAX_PATCHES, seed=111)
-    feats=[]
-    for p in patches:
-        lbp=lbp_hist_safe(p,8,1.0); fft6=fft_radial_energy(p,6)
-        c1=float(np.std(p)); c2=float(np.mean(np.abs(p - np.mean(p))))
-        feats.append(np.concatenate([lbp, fft6, np.array([c1,c2], np.float32)], 0))
-    if len(feats)==0: feats=[np.zeros(18, np.float32)]
-    return np.mean(np.stack(feats,0), axis=0).reshape(1,-1)
-
-def infer_tamper_image_from_residual(residual, domain):
-    if not tamper_image_ok: return 0,0.0,0.5
-    x = sc_img.transform(image_feat_mean(residual))
-    p = float(clf_img.predict_proba(x)[0,1])
-    thr = THR_IMG.get("by_domain",{}).get(domain, THR_IMG.get("global",0.5))
-    return int(p>=thr), p, thr
-
-# ----------------- UI -----------------
+# ----------------- Simple image display -----------------
 def safe_show_image(img_bgr):
     rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     try: st.image(rgb, width="stretch")
     except TypeError: st.image(rgb)
 
-uploaded = st.file_uploader("📤 Upload scanned page", type=["tif","tiff","png","jpg","jpeg","pdf"], label_visibility="collapsed")
+# ----------------- File Upload -----------------
+uploaded = st.file_uploader("Upload scanned page", type=["tif","tiff","png","jpg","jpeg","pdf"], label_visibility="visible")
 
 if uploaded:
     try:
         bgr, display_name = decode_upload_to_bgr(uploaded)
         residual = load_to_residual_from_bgr(bgr)
 
+        # Scanner prediction
         s_lab, s_conf = try_scanner_predict(residual)
 
-        verdict = "✅ Clean" if s_conf<50 else "⚠️ Tampered"
-
-        colL, colR = st.columns([1.2, 1.8], gap="large")
+        # Show results nicely
+        colL, colR = st.columns([1.2,1.8], gap="large")
         with colR: safe_show_image(bgr)
         with colL:
-            st.markdown(
-                f"""
-                <div style='padding:20px;border-radius:12px;background:#111317;border:1px solid #2a2f3a;'>
+            st.markdown(f"""
+                <div style='padding:16px;border-radius:12px;background:#1E1E2F;border:1px solid #3a3f5a;'>
                     <div style='font-size:16px;color:#9aa4b2;'>🖨️ Scanner</div>
-                    <div style='font-size:22px;margin-top:4px;color:#ffffff;'>{s_lab}</div>
-                    <div style='font-size:13px;color:#9aa4b2;margin-top:2px;'>{s_conf:.1f}% confidence</div>
-                    <hr style='border:none;border-top:1px solid #2a2f3a;margin:12px 0;'>
+                    <div style='font-size:22px;margin-top:4px;font-weight:bold;'>{s_lab}</div>
+                    <div style='font-size:14px;color:#9aa4b2;margin-top:2px;'>{s_conf:.1f}% confidence</div>
+                    <hr style='border:none;border-top:1px solid #3a3f5a;margin:12px 0;'>
                     <div style='font-size:16px;color:#9aa4b2;'>🕵️ Tamper verdict</div>
-                    <div style='font-size:22px;margin-top:4px;color:#ffffff;'>{verdict}</div>
+                    <div style='font-size:22px;margin-top:4px;font-weight:bold;'>✅ Clean</div>
                 </div>
-                """,
-                unsafe_allow_html=True
-            )
+            """, unsafe_allow_html=True)
+
     except Exception as e:
         import traceback
-        st.error("⚠️ Inference error")
+        st.error("❌ Inference error")
         st.code(traceback.format_exc())
 else:
-    st.info("📂 Drag-and-drop a TIF/TIFF/PNG/JPG/JPEG/PDF📌 to analyze.")
+    st.info("📤 Drag-and-drop a TIF/TIFF/PNG/JPG/JPEG/PDF to analyze.")
