@@ -1,16 +1,16 @@
-# Core libraries
-numpy
-pandas
-scikit-learn
-tensorflow
-joblib
-streamlit
-Pillow
-opencv-python
-matplotlib
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.1
+tensorflow==2.17.0
+joblib==1.4.2
+streamlit==1.38.0
+Pillow==10.4.0
 
-# For image feature extraction and processing
-scipy
+# Image and signal processing
+opencv-python-headless==4.10.0.84
+PyWavelets==1.6.0
+scipy==1.13.1
+matplotlib==3.9.1
 
-# Optional (but recommended)
-tqdm
+# Optional utilities
+tqdm==4.66.4
