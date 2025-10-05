@@ -2,7 +2,10 @@
 
 import os
 import pickle
+import tempfile
 from pathlib import Path
+from urllib.request import urlretrieve
+
 import numpy as np
 import streamlit as st
 import cv2
@@ -10,8 +13,6 @@ import pywt
 import tensorflow as tf
 from tensorflow.keras.layers import TFSMLayer
 from skimage.feature import local_binary_pattern as sk_lbp
-from urllib.request import urlretrieve
-import tempfile
 
 # ----------------- App Config -----------------
 APP_TITLE = "🖨️ TraceFinder 2.0 - Forensic Scanner & Tamper Dashboard"
@@ -20,27 +21,63 @@ PATCH = 128
 STRIDE = 64
 MAX_PATCHES = 16
 
-# GitHub URLs for models/artifacts
-ARTIFACTS = {
-    "scanner_model": "https://github.com/Priyanga57/AI_TraceFinder_Priyanga/raw/main/App/models/scanner_hybrid.keras",
-    "label_encoder": "https://github.com/Priyanga57/AI_TraceFinder_Priyanga/raw/main/App/models/hybrid_label_encoder.pkl",
-    "scanner_fps": "https://github.com/Priyanga57/AI_TraceFinder_Priyanga/raw/main/App/models/scannerfingerprints.pkl",
-    "fp_keys": "https://github.com/Priyanga57/AI_TraceFinder_Priyanga/raw/main/App/models/fp_keys.npy",
-    "scaler": "https://github.com/Priyanga57/AI_TraceFinder_Priyanga/raw/main/App/models/hybrid_feat_scaler.pkl"
-}
-
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.markdown(f"<h1 style='color:white'>{APP_TITLE}</h1>", unsafe_allow_html=True)
 st.markdown("🔍 Upload a scanned page to analyze the **scanner source** & check for **tampering**.")
 
-# ----------------- Helper: download GitHub file -----------------
-def download_from_github(url):
-    temp_dir = tempfile.gettempdir()
-    filename = os.path.join(temp_dir, os.path.basename(url))
-    urlretrieve(url, filename)
-    return filename
+# ----------------- GitHub Model URLs -----------------
+GITHUB_BASE = "https://github.com/Priyanga57/AI_TraceFinder_Priyanga/raw/main/App/models"
+MODEL_URL = f"{GITHUB_BASE}/scanner_hybrid.keras"
+LE_URL = f"{GITHUB_BASE}/hybrid_label_encoder.pkl"
+FPS_URL = f"{GITHUB_BASE}/scannerfingerprints.pkl"
+KEYS_URL = f"{GITHUB_BASE}/fp_keys.npy"
+SCALER_URL = f"{GITHUB_BASE}/hybrid_feat_scaler.pkl"
 
-# ----------------- Image utils -----------------
+tmp_dir = tempfile.gettempdir()
+
+# ----------------- Download helper -----------------
+def download_from_github(url, filename):
+    local_path = os.path.join(tmp_dir, filename)
+    if not os.path.exists(local_path):
+        urlretrieve(url, local_path)
+    return local_path
+
+# ----------------- Load Scanner Model -----------------
+def load_scanner_model():
+    try:
+        model_path = download_from_github(MODEL_URL, "scanner_hybrid.keras")
+        model = tf.keras.Sequential([TFSMLayer(model_path, call_endpoint="serving_default")])
+        return model
+    except Exception as e:
+        st.error(f"🛑 Failed loading scanner model: {e}")
+        return None
+
+scanner_model = load_scanner_model()
+scanner_ready = scanner_model is not None
+scanner_err = None if scanner_ready else "Scanner model not loaded."
+
+# ----------------- Load artifacts -----------------
+def load_artifacts():
+    le_path = download_from_github(LE_URL, "hybrid_label_encoder.pkl")
+    fps_path = download_from_github(FPS_URL, "scannerfingerprints.pkl")
+    keys_path = download_from_github(KEYS_URL, "fp_keys.npy")
+    scaler_path = download_from_github(SCALER_URL, "hybrid_feat_scaler.pkl")
+
+    le = pickle.load(open(le_path, "rb"))
+    fps = pickle.load(open(fps_path, "rb"))
+    keys = np.load(keys_path, allow_pickle=True).tolist()
+    scaler = pickle.load(open(scaler_path, "rb"))
+    return le, fps, keys, scaler
+
+if scanner_ready:
+    try:
+        le_sc, scanner_fps, fp_keys, sc_scaler = load_artifacts()
+        st.success("✅ Scanner model and artifacts loaded successfully from GitHub!")
+    except Exception as e:
+        scanner_ready = False
+        scanner_err = f"🛑 Failed loading artifacts: {e}"
+
+# ----------------- Image & Feature utils -----------------
 def decode_upload_to_bgr(uploaded):
     uploaded.seek(0)
     raw = uploaded.read()
@@ -85,25 +122,10 @@ def fft_radial_energy(img, K=6):
     yy, xx = np.ogrid[:h, :w]
     r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     bins = np.linspace(0, r.max() + 1e-6, K + 1)
-    feats = [float(mag[(r >= bins[i]) & (r < bins[i + 1])].mean() if ((r >= bins[i]) & (r < bins[i + 1])).any() else 0.0) for i in range(K)]
+    feats = [float(mag[(r >= bins[i]) & (r < bins[i + 1])].mean() if ((r >= bins[i]) & (r < bins[i + 1])).any() else 0.0)
+             for i in range(K)]
     return np.asarray(feats, dtype=np.float32)
 
-# ----------------- Load Scanner Model & Artifacts -----------------
-try:
-    scanner_model_path = download_from_github(ARTIFACTS["scanner_model"])
-    scanner_model = tf.keras.Sequential([TFSMLayer(scanner_model_path, call_endpoint='serving_default')])
-    le_sc = pickle.load(open(download_from_github(ARTIFACTS["label_encoder"]), "rb"))
-    scanner_fps = pickle.load(open(download_from_github(ARTIFACTS["scanner_fps"]), "rb"))
-    fp_keys = np.load(download_from_github(ARTIFACTS["fp_keys"]), allow_pickle=True).tolist()
-    sc_scaler = pickle.load(open(download_from_github(ARTIFACTS["scaler"]), "rb"))
-    scanner_ready = True
-    st.success("✅ Scanner model and artifacts loaded from GitHub!")
-except Exception as e:
-    scanner_ready = False
-    scanner_err = f"🛑 Failed loading scanner model or artifacts: {e}"
-    st.error(scanner_err)
-
-# ----------------- Prediction Functions -----------------
 def corr2d(a, b):
     a, b = a.ravel().astype(np.float32), b.ravel().astype(np.float32)
     a -= a.mean(); b -= b.mean()
@@ -118,7 +140,7 @@ def make_scanner_feats(res):
 
 def try_scanner_predict(res):
     if not scanner_ready:
-        if 'scanner_err' in globals(): st.info(scanner_err)
+        if scanner_err: st.info(scanner_err)
         return "Unknown", 0.0
     x_img = np.expand_dims(res, axis=(0, -1))
     x_feat = make_scanner_feats(res)
@@ -128,7 +150,7 @@ def try_scanner_predict(res):
     idx = int(np.argmax(ps))
     return str(le_sc.classes_[idx]), float(ps[idx] * 100.0)
 
-# ----------------- UI -----------------
+# ----------------- Streamlit UI -----------------
 def safe_show_image(img_bgr):
     rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     st.image(rgb, use_column_width=True)
@@ -140,7 +162,7 @@ if uploaded:
         bgr, name = decode_upload_to_bgr(uploaded)
         residual = load_to_residual_from_bgr(bgr)
         s_label, s_conf = try_scanner_predict(residual)
-        verdict = "✅ Clean"  # Placeholder
+        verdict = "✅ Clean"  # placeholder
 
         col1, col2 = st.columns([1.5, 2], gap="large")
         with col2:
