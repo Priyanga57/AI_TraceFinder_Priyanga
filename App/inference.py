@@ -1,117 +1,88 @@
-import io, pickle, joblib
+import os
+import pickle
 import numpy as np
+import cv2
+import pywt
+import json
 import tensorflow as tf
-from pathlib import Path
-from PIL import Image
-from skimage.feature import local_binary_pattern
-from app.utils.preprocess import preprocess_residual_from_array
+from sklearn.preprocessing import StandardScaler
 
-# ----------------- BASE PATH -----------------
-BASE = Path("app/models")
+# Base model directory
+BASE_DIR = r"C:\AI Trace Finder\App\models"
 
-# ----------------- MODEL LOADER -----------------
-def load_hybrid_model():
-    """Load hybrid CNN+features model from available variants."""
-    candidates = [
-        BASE / "scanner_hybrid_14.keras",
-        BASE / "scanner_hybrid.keras",
-        BASE / "scanner_hybrid.h5"
-    ]
-    for p in candidates:
-        if p.exists():
-            return tf.keras.models.load_model(str(p))
-    raise FileNotFoundError("No hybrid scanner model (.keras/.h5) found.")
+# === Load scanner model and assets ===
+def load_scanner_models():
+    paths = {
+        "model": os.path.join(BASE_DIR, "scanner_hybrid.keras"),
+        "encoder": os.path.join(BASE_DIR, "hybrid_label_encoder.pkl"),
+        "scaler": os.path.join(BASE_DIR, "hybrid_feat_scaler.pkl"),
+        "fp": os.path.join(BASE_DIR, "scannerfingerprints.pkl"),
+        "keys": os.path.join(BASE_DIR, "fp_keys.npy"),
+    }
 
-hybrid_model = load_hybrid_model()
-req_feat_dim = int(hybrid_model.inputs[1].shape[-1])
+    model = tf.keras.models.load_model(paths["model"], compile=False)
+    with open(paths["encoder"], "rb") as f:
+        encoder = pickle.load(f)
+    with open(paths["scaler"], "rb") as f:
+        scaler = pickle.load(f)
+    with open(paths["fp"], "rb") as f:
+        fp = pickle.load(f)
+    keys = np.load(paths["keys"], allow_pickle=True)
+    return model, encoder, scaler, fp, keys
 
-# ----------------- AUX DATA -----------------
-scaler = joblib.load(BASE / "hybrid_feat_scaler.pkl")
 
-if req_feat_dim == 30:
-    fp_path, key_path = BASE/"scanner_fingerprints_14.pkl", BASE/"fp_keys_14.npy"
-elif req_feat_dim == 27:
-    fp_path, key_path = BASE/"scannerfingerprints.pkl", BASE/"fp_keys.npy"
-else:
-    raise RuntimeError(f"Unsupported feature size: {req_feat_dim}")
+# === Feature extraction functions ===
+def preprocess_image(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, (224, 224))
+    return gray.astype(np.float32) / 255.0
 
-with open(fp_path, "rb") as f:
-    scanner_fps = pickle.load(f)
-fp_keys = np.load(key_path, allow_pickle=True).tolist()
 
-if getattr(scaler, "n_features_in_", None) != req_feat_dim:
-    raise RuntimeError("Scaler features mismatch with model/tabular input")
+def extract_features(img):
+    coeffs2 = pywt.dwt2(img, 'haar')
+    LL, (LH, HL, HH) = coeffs2
+    features = np.concatenate([LL.flatten(), LH.flatten(), HL.flatten(), HH.flatten()])
+    return features[:5000]  # Limit for consistency
 
-label_enc = joblib.load(BASE / "hybrid_label_encoder.pkl")
 
-# ----------------- FEATURE HELPERS -----------------
-def corr2d(a: np.ndarray, b: np.ndarray) -> float:
-    """Normalized correlation between 2 images."""
-    a, b = a.astype(np.float32).ravel(), b.astype(np.float32).ravel()
-    a -= a.mean(); b -= b.mean()
-    denom = np.linalg.norm(a) * np.linalg.norm(b)
-    return float((a @ b) / denom) if denom != 0 else 0.0
+# === Prediction ===
+def predict_scanner(img):
+    model, encoder, scaler, _, _ = load_scanner_models()
+    feat = extract_features(preprocess_image(img))
+    feat_scaled = scaler.transform([feat])
+    preds = model.predict(feat_scaled)
+    label_idx = np.argmax(preds)
+    confidence = float(np.max(preds) * 100)
+    label = encoder.inverse_transform([label_idx])[0]
+    return label, confidence
 
-def fft_radial(img: np.ndarray, bins: int = 6):
-    """Radial FFT energy distribution."""
-    f = np.fft.fftshift(np.fft.fft2(img))
-    mag = np.abs(f)
-    h, w = mag.shape
-    cy, cx = h // 2, w // 2
-    yy, xx = np.ogrid[:h, :w]
-    r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
-    edges = np.linspace(0, r.max() + 1e-6, bins + 1)
-    return [
-        float(mag[(r >= edges[i]) & (r < edges[i+1])].mean()
-              if np.any((r >= edges[i]) & (r < edges[i+1])) else 0.0)
-        for i in range(bins)
-    ]
 
-def lbp_hist(img: np.ndarray, P: int = 8, R: float = 1.0):
-    """Normalized LBP histogram."""
-    rng = float(np.ptp(img))
-    norm = np.zeros_like(img, dtype=np.float32) if rng < 1e-12 else (img - img.min()) / (rng + 1e-8)
-    u8 = (norm * 255).astype(np.uint8)
-    codes = local_binary_pattern(u8, P, R, method="uniform")
-    n_bins = P + 2
-    hist, _ = np.histogram(codes, bins=np.arange(n_bins+1), density=True)
-    return hist.astype(np.float32).tolist()
+# === Tamper Detection Models ===
+def load_tamper_models():
+    patch_dir = os.path.join(BASE_DIR, "artifacts_tamper_patch")
+    pair_dir = os.path.join(BASE_DIR, "artifacts_tamper_pair")
 
-def make_features(residual: np.ndarray):
-    """Construct tabular features vector from residual fingerprint."""
-    feats_corr = [corr2d(residual, scanner_fps[k]) for k in fp_keys]
-    feats_fft  = fft_radial(residual, bins=6)
-    feats_lbp  = lbp_hist(residual, P=8, R=1.0)
-    vec = np.array(feats_corr + feats_fft + feats_lbp, dtype=np.float32).reshape(1, -1)
-    return scaler.transform(vec)
+    with open(os.path.join(patch_dir, "patch_scaler.pkl"), "rb") as f:
+        patch_scaler = pickle.load(f)
+    with open(os.path.join(patch_dir, "patch_svm_sig_calibrated.pkl"), "rb") as f:
+        patch_svm = pickle.load(f)
+    with open(os.path.join(patch_dir, "thresholds_patch.json"), "r") as f:
+        patch_thresh = json.load(f)
 
-# ----------------- PREDICT FUNCTION -----------------
-def predict_from_bytes(img_bytes: bytes):
-    """
-    Run full inference pipeline.
-    Args:
-        img_bytes (bytes): input scanned page image
-    Returns:
-        dict: {label, confidence, top3}
-    """
-    # 1. Load + residual
-    img = Image.open(io.BytesIO(img_bytes)).convert("L")
-    res = preprocess_residual_from_array(np.array(img))
+    with open(os.path.join(pair_dir, "pair_scaler.pkl"), "rb") as f:
+        pair_scaler = pickle.load(f)
+    with open(os.path.join(pair_dir, "pair_svm_sig.pkl"), "rb") as f:
+        pair_svm = pickle.load(f)
+    with open(os.path.join(pair_dir, "pair_thresholds_topk.json"), "r") as f:
+        pair_thresh = json.load(f)
 
-    # 2. Inputs
-    x_img = np.expand_dims(res, axis=(0, -1))     # CNN branch
-    x_tab = make_features(res)                    # Tabular branch
+    return patch_scaler, patch_svm, patch_thresh, pair_scaler, pair_svm, pair_thresh
 
-    # 3. Model predict
-    probs = np.asarray(hybrid_model.predict([x_img, x_tab], verbose=0)).ravel()
-    idx = int(np.argmax(probs))
-    label = label_enc.classes_[idx]
-    conf = float(probs[idx] * 100)
 
-    # 4. Top-3
-    k = min(3, probs.size)
-    top_idx = np.argpartition(probs, -k)[-k:]
-    top_idx = top_idx[np.argsort(probs[top_idx])[::-1]]
-    top3 = [(label_enc.classes_[i], float(probs[i] * 100)) for i in top_idx]
-
-    return {"label": label, "confidence": conf, "top3": top3}
+def predict_tamper(img):
+    patch_scaler, patch_svm, patch_thresh, _, _, _ = load_tamper_models()
+    feat = extract_features(preprocess_image(img))
+    feat_scaled = patch_scaler.transform([feat])
+    prob = patch_svm.predict_proba(feat_scaled)[0][1]
+    verdict = "Tampered" if prob > patch_thresh["threshold"] else "Clean"
+    return verdict, prob * 100
