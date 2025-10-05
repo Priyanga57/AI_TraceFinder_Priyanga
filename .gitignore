@@ -1,0 +1,106 @@
+# =========================
+# Python / Machine Learning
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.joblib
+*.log
+*.csv
+*.xlsx
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.keras
+*.ckpt*
+*.tfrecord
+*.json
+
+# =========================
+# Jupyter / Colab
+# =========================
+.ipynb_checkpoints/
+*.ipynb_save
+*.ipynb_tmp
+
+# =========================
+# OS / System
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# IDEs / Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# Environment / Config
+# =========================
+.env
+.venv/
+venv/
+env/
+ENV/
+*.env
+config.json
+
+# =========================
+# Build / Distribution
+# =========================
+build/
+dist/
+*.egg-info/
+.eggs/
+*.manifest
+*.spec
+
+# =========================
+# Data / Artifacts / Outputs
+# =========================
+/data/
+/datasets/
+/artifacts_tamper_patch/
+/artifacts_tamper_pair/
+/metrics/
+/results/
+/outputs/
+/logs/
+/tmp/
+/runs/
+/checkpoints/
+/models/
+/scanner_fingerprints*.pkl
+
+# =========================
+# Google Colab / Drive Mounts
+# =========================
+/content/
+/mnt/
+/drive/
+
+# =========================
+# Archives / Backups
+# =========================
+*.zip
+*.tar
+*.tar.gz
+*.bak
+*.old
+*.tmp
+*.cache
+
+# =========================
+# Optional: ignore large models
+# =========================
+/app/models/*.keras
+/app/models/*.h5
+/app/models/*.pkl
+/app/models/*.joblib
