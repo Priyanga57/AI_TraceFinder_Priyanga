@@ -1,19 +1,21 @@
-numpy
-scipy
-scikit-learn
-tensorflow
-joblib
-pandas
-matplotlib
-seaborn
-Pillow
-scikit-image
-opencv-python
+# Core Python dependencies
+numpy>=1.26.0
+scipy>=1.13.0
+pandas>=2.2.0
+matplotlib>=3.9.0
+scikit-image>=0.24.0
+scikit-learn>=1.5.0
+
+# Deep learning
+tensorflow>=2.16.0
+
+# Image and file handling
+Pillow>=10.3.0
+joblib>=1.4.2
+
+# Web app framework
+streamlit>=1.37.0
+
+# Utilities
+tqdm>=4.66.0
 pathlib
-tqdm
-glob2
-imageio
-h5py
-appdirs
-pickle5
-ipython
