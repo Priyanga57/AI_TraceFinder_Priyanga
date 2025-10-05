@@ -1,0 +1,9 @@
+streamlit
+numpy
+opencv-python
+scikit-image
+pywt
+pillow
+tensorflow>=2.14
+PyMuPDF
+pdf2image
