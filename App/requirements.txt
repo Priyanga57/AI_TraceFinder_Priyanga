@@ -1,9 +1,8 @@
-streamlit
-numpy
-opencv-python
-scikit-image
-pywt
-pillow
-tensorflow>=2.14
-PyMuPDF
-pdf2image
+streamlit==1.26.0
+numpy==1.27.5
+opencv-python-headless==4.8.1.78
+scikit-image==0.21.0
+pywt==1.4.1
+Pillow==10.1.0
+tensorflow==2.14.0
+PyMuPDF==1.23.1
