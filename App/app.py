@@ -1,71 +1,36 @@
-# app/app.py
-
-import os
-import pickle
-from pathlib import Path
-
+import os, re, glob, math, json, pickle
 import numpy as np
 import streamlit as st
-import cv2
-import pywt
-import tensorflow as tf
+import cv2, pywt
 from skimage.feature import local_binary_pattern as sk_lbp
-from tensorflow.keras.layers import TFSMLayer
 
-# ----------------- App Config -----------------
-APP_TITLE = "🖨️ TraceFinder 2.0 - Forensic Scanner & Tamper Dashboard"
+# ---------------- CONFIG ----------------
+ROOT = r"C:\AI Trace Finder\App\models"  # Local path to models & artifacts
+TAMP_ROOT = os.path.join(ROOT, "Tampered images")
+
+APP_TITLE = "🖨️🕵️ TraceFinder 2.0 - Forensic Scanner & Tamper Dashboard"
 IMG_SIZE = (256, 256)
 PATCH = 128
 STRIDE = 64
 MAX_PATCHES = 16
 
-# Local model/artifacts path
-BASE_DIR = Path(r"C:\AI Trace Finder\App\models")
-ART_SCN = BASE_DIR
+TOPK = 0.30
+HIT_THR = 0.85
+MIN_HITS = 2
 
+# ---------------- Page ----------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.markdown(f"<h1 style='color:white'>{APP_TITLE}</h1>", unsafe_allow_html=True)
-st.markdown("🔍 Upload a scanned page to analyze the **scanner source** & check for **tampering**.")
+st.markdown(f"""
+<h1 style='background: linear-gradient(90deg, #1e3c72, #2a5298);
+            -webkit-background-clip: text; color: transparent;
+            font-weight:bold;'>{APP_TITLE}</h1>
+""", unsafe_allow_html=True)
 
-# ----------------- Load Scanner Model -----------------
-def load_scanner_model():
-    path = ART_SCN / "scanner_hybrid.keras"
-    if path.exists():
-        try:
-            # Keras 3 SavedModel loading
-            model = tf.keras.Sequential([TFSMLayer(str(path), call_endpoint="serving_default")])
-            return model
-        except Exception as e:
-            st.error(f"🛑 Failed loading scanner model: {e}")
-    else:
-        st.error("🛑 Scanner model file not found at local path.")
-    return None
-
-scanner_model = load_scanner_model()
-scanner_ready = scanner_model is not None
-scanner_err = None if scanner_ready else "Scanner model not loaded."
-
-# ----------------- Load Artifacts -----------------
-def load_artifacts():
-    le = pickle.load(open(ART_SCN / "hybrid_label_encoder.pkl", "rb"))
-    fps = pickle.load(open(ART_SCN / "scannerfingerprints.pkl", "rb"))
-    keys = np.load(ART_SCN / "fp_keys.npy", allow_pickle=True).tolist()
-    scaler = pickle.load(open(ART_SCN / "hybrid_feat_scaler.pkl", "rb"))
-    return le, fps, keys, scaler
-
-if scanner_ready:
-    try:
-        le_sc, scanner_fps, fp_keys, sc_scaler = load_artifacts()
-        st.success("✅ Scanner model and artifacts loaded successfully!")
-    except Exception as e:
-        scanner_ready = False
-        scanner_err = f"🛑 Failed loading artifacts: {e}"
-
-# ----------------- Image & Feature utils -----------------
+# ---------------- Utils ----------------
 def decode_upload_to_bgr(uploaded):
-    uploaded.seek(0)
     raw = uploaded.read()
-    ext = os.path.splitext(uploaded.name.lower())[-1]
+    name = uploaded.name
+    ext = os.path.splitext(name.lower())[-1]
     if ext == ".pdf":
         import fitz
         doc = fitz.open(stream=raw, filetype="pdf")
@@ -74,12 +39,11 @@ def decode_upload_to_bgr(uploaded):
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
         if pix.n == 4:
             img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
-        return cv2.cvtColor(img, cv2.COLOR_RGB2BGR), uploaded.name
-    buf = np.frombuffer(raw, np.uint8)
-    bgr = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+        return cv2.cvtColor(img, cv2.COLOR_RGB2BGR), name
+    bgr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
     if bgr is None:
         raise ValueError("Could not decode file")
-    return bgr, uploaded.name
+    return bgr, name
 
 def load_to_residual_from_bgr(bgr):
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
@@ -88,6 +52,28 @@ def load_to_residual_from_bgr(bgr):
     cH.fill(0); cV.fill(0); cD.fill(0)
     den = pywt.idwt2((cA, (cH, cV, cD)), "haar")
     return (gray - den).astype(np.float32)
+
+# ---------------- Load Scanner Model & Artifacts ----------------
+ART_SCN = ROOT
+hyb_model = None
+try:
+    import tensorflow as tf
+    model_path = os.path.join(ART_SCN, "scanner_hybrid.keras")
+    if os.path.exists(model_path):
+        hyb_model = tf.keras.models.load_model(model_path)
+except Exception:
+    hyb_model = None
+
+with open(os.path.join(ART_SCN, "hybrid_label_encoder.pkl"), "rb") as f: le_sc = pickle.load(f)
+with open(os.path.join(ART_SCN, "hybrid_feat_scaler.pkl"), "rb") as f: sc_sc = pickle.load(f)
+with open(os.path.join(ART_SCN, "scanner_fingerprints.pkl"), "rb") as f: fps = pickle.load(f)
+fp_keys = np.load(os.path.join(ART_SCN, "fp_keys.npy"), allow_pickle=True).tolist()
+
+def corr2d(a, b):
+    a = a.astype(np.float32).ravel(); b = b.astype(np.float32).ravel()
+    a -= a.mean(); b -= b.mean()
+    d = np.linalg.norm(a) * np.linalg.norm(b)
+    return float((a @ b) / d) if d != 0 else 0.0
 
 def lbp_hist_safe(img, P=8, R=1.0):
     rng = float(np.ptp(img))
@@ -99,75 +85,63 @@ def lbp_hist_safe(img, P=8, R=1.0):
     return hist.astype(np.float32)
 
 def fft_radial_energy(img, K=6):
-    f = np.fft.fftshift(np.fft.fft2(img))
-    mag = np.abs(f)
-    h, w = mag.shape
-    cy, cx = h // 2, w // 2
-    yy, xx = np.ogrid[:h, :w]
-    r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    f = np.fft.fftshift(np.fft.fft2(img)); mag = np.abs(f)
+    h, w = mag.shape; cy, cx = h // 2, w // 2
+    yy, xx = np.ogrid[:h, :w]; r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     bins = np.linspace(0, r.max() + 1e-6, K + 1)
-    feats = [float(mag[(r >= bins[i]) & (r < bins[i + 1])].mean() if ((r >= bins[i]) & (r < bins[i + 1])).any() else 0.0)
-             for i in range(K)]
+    feats = [float(mag[(r >= bins[i]) & (r < bins[i + 1])].mean() if ((r >= bins[i]) & (r < bins[i + 1])).any() else 0.0) for i in range(K)]
     return np.asarray(feats, dtype=np.float32)
 
-def corr2d(a, b):
-    a, b = a.ravel().astype(np.float32), b.ravel().astype(np.float32)
-    a -= a.mean(); b -= b.mean()
-    d = np.linalg.norm(a) * np.linalg.norm(b)
-    return float((a @ b) / d) if d != 0 else 0.0
-
 def make_scanner_feats(res):
-    v_corr = [corr2d(res, scanner_fps[k]) for k in fp_keys]
-    v_fft = fft_radial_energy(res, K=6).tolist()
-    v_lbp = lbp_hist_safe(res, P=8, R=1.0).tolist()
-    return sc_scaler.transform(np.array(v_corr + v_fft + v_lbp, dtype=np.float32).reshape(1, -1))
+    v_corr = [corr2d(res, fps[k]) for k in fp_keys]
+    v_fft  = fft_radial_energy(res, K=6)
+    v_lbp  = lbp_hist_safe(res, P=8, R=1.0)
+    v = np.array(v_corr + v_fft.tolist() + v_lbp.tolist(), dtype=np.float32).reshape(1, -1)
+    return sc_sc.transform(v)
 
-def try_scanner_predict(res):
-    if not scanner_ready:
-        if scanner_err: st.info(scanner_err)
-        return "Unknown", 0.0
-    x_img = np.expand_dims(res, axis=(0, -1))
-    x_feat = make_scanner_feats(res)
-    ps = scanner_model.predict([x_img, x_feat], verbose=0).ravel()
-    if np.isnan(ps).any() or np.allclose(ps, 0):
-        return "Unknown", 0.0
-    idx = int(np.argmax(ps))
-    return str(le_sc.classes_[idx]), float(ps[idx] * 100.0)
-
-# ----------------- Streamlit UI -----------------
-def safe_show_image(img_bgr):
-    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    st.image(rgb, use_column_width=True)
-
-uploaded = st.file_uploader("📤 Upload a scanned page", type=["tif","tiff","png","jpg","jpeg","pdf"])
-
+# ---------------- UI ----------------
+st.write("")
+uploaded = st.file_uploader("📤 Upload scanned page", type=["tif","tiff","png","jpg","jpeg","pdf"])
 if uploaded:
     try:
         bgr, name = decode_upload_to_bgr(uploaded)
         residual = load_to_residual_from_bgr(bgr)
-        s_label, s_conf = try_scanner_predict(residual)
-        verdict = "✅ Clean"  # placeholder
 
-        col1, col2 = st.columns([1.5, 2], gap="large")
-        with col2:
-            safe_show_image(bgr)
-        with col1:
+        # Scanner ID
+        s_lab, s_conf = "Unknown", 0.0
+        if hyb_model is not None:
+            import tensorflow as tf
+            x_img = np.expand_dims(residual, axis=(0, -1))
+            x_ft  = make_scanner_feats(residual)
+            ps = hyb_model.predict([x_img, x_ft], verbose=0).ravel()
+            s_idx = int(np.argmax(ps)); s_lab = le_sc.classes_[s_idx]; s_conf = float(ps[s_idx] * 100.0)
+
+        verdict = "Clean"  # Placeholder: integrate tamper logic here
+
+        # ---------------- Display ----------------
+        colL, colR = st.columns([1.2, 1.8], gap="large")
+        with colR:
+            st.image(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), use_container_width=True)
+        with colL:
             st.markdown(f"""
-            <div style='padding:16px;border-radius:12px;background:#2d2d44;color:white;'>
+            <div style='padding:20px;border-radius:16px;
+                        background: linear-gradient(135deg,#1e3c72,#2a5298);
+                        color:white;font-family:sans-serif;'>
                 <h2>🖨️ Scanner Identification</h2>
-                <h1 style='color:#ffda79'>{s_label} ✅</h1>
-                <p>Confidence: <b>{s_conf:.1f}%</b> {"🔹" * int(s_conf // 10)}</p>
-                <div style='background:#444;border-radius:8px;overflow:hidden;height:12px;width:100%;margin-bottom:10px;'>
+                <h1 style='color:#ffda79'>{s_lab}</h1>
+                <div style='margin-bottom:8px;'>Confidence: <b>{s_conf:.1f}%</b> {"🔹"*int(s_conf//10)}</div>
+                <div style='background:#444;border-radius:8px;overflow:hidden;height:12px;margin-bottom:20px;'>
                     <div style='width:{s_conf}%;background:#ffda79;height:12px;'></div>
                 </div>
+
                 <h2>🕵️ Tamper Verdict</h2>
-                <h1 style='color:#70ff70'>{verdict} 🔍</h1>
+                <h1 style='color:#70ff70'>{verdict}</h1>
             </div>
             """, unsafe_allow_html=True)
 
-    except Exception as e:
+    except Exception:
         import traceback
-        st.error("⚠️ Inference error!")
+        st.error("⚠️ Inference error")
         st.code(traceback.format_exc())
 else:
-    st.info("📂 Drag & drop a TIF/TIFF/PNG/JPG/JPEG/PDF to analyze the scanner.")
+    st.info("📂 Drag-and-drop a TIF/TIFF/PNG/JPG/JPEG/PDF to analyze.")
