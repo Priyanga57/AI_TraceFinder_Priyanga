@@ -2,17 +2,15 @@
 
 import os
 import pickle
-import tempfile
 from pathlib import Path
-from urllib.request import urlretrieve
 
 import numpy as np
 import streamlit as st
 import cv2
 import pywt
 import tensorflow as tf
-from tensorflow.keras.layers import TFSMLayer
 from skimage.feature import local_binary_pattern as sk_lbp
+from tensorflow.keras.layers import TFSMLayer
 
 # ----------------- App Config -----------------
 APP_TITLE = "🖨️ TraceFinder 2.0 - Forensic Scanner & Tamper Dashboard"
@@ -21,58 +19,44 @@ PATCH = 128
 STRIDE = 64
 MAX_PATCHES = 16
 
+# Local model/artifacts path
+BASE_DIR = Path(r"C:\AI Trace Finder\App\models")
+ART_SCN = BASE_DIR
+
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.markdown(f"<h1 style='color:white'>{APP_TITLE}</h1>", unsafe_allow_html=True)
 st.markdown("🔍 Upload a scanned page to analyze the **scanner source** & check for **tampering**.")
 
-# ----------------- GitHub Model URLs -----------------
-GITHUB_BASE = "https://github.com/Priyanga57/AI_TraceFinder_Priyanga/raw/main/App/models"
-MODEL_URL = f"{GITHUB_BASE}/scanner_hybrid.keras"
-LE_URL = f"{GITHUB_BASE}/hybrid_label_encoder.pkl"
-FPS_URL = f"{GITHUB_BASE}/scannerfingerprints.pkl"
-KEYS_URL = f"{GITHUB_BASE}/fp_keys.npy"
-SCALER_URL = f"{GITHUB_BASE}/hybrid_feat_scaler.pkl"
-
-tmp_dir = tempfile.gettempdir()
-
-# ----------------- Download helper -----------------
-def download_from_github(url, filename):
-    local_path = os.path.join(tmp_dir, filename)
-    if not os.path.exists(local_path):
-        urlretrieve(url, local_path)
-    return local_path
-
 # ----------------- Load Scanner Model -----------------
 def load_scanner_model():
-    try:
-        model_path = download_from_github(MODEL_URL, "scanner_hybrid.keras")
-        model = tf.keras.Sequential([TFSMLayer(model_path, call_endpoint="serving_default")])
-        return model
-    except Exception as e:
-        st.error(f"🛑 Failed loading scanner model: {e}")
-        return None
+    path = ART_SCN / "scanner_hybrid.keras"
+    if path.exists():
+        try:
+            # Keras 3 SavedModel loading
+            model = tf.keras.Sequential([TFSMLayer(str(path), call_endpoint="serving_default")])
+            return model
+        except Exception as e:
+            st.error(f"🛑 Failed loading scanner model: {e}")
+    else:
+        st.error("🛑 Scanner model file not found at local path.")
+    return None
 
 scanner_model = load_scanner_model()
 scanner_ready = scanner_model is not None
 scanner_err = None if scanner_ready else "Scanner model not loaded."
 
-# ----------------- Load artifacts -----------------
+# ----------------- Load Artifacts -----------------
 def load_artifacts():
-    le_path = download_from_github(LE_URL, "hybrid_label_encoder.pkl")
-    fps_path = download_from_github(FPS_URL, "scannerfingerprints.pkl")
-    keys_path = download_from_github(KEYS_URL, "fp_keys.npy")
-    scaler_path = download_from_github(SCALER_URL, "hybrid_feat_scaler.pkl")
-
-    le = pickle.load(open(le_path, "rb"))
-    fps = pickle.load(open(fps_path, "rb"))
-    keys = np.load(keys_path, allow_pickle=True).tolist()
-    scaler = pickle.load(open(scaler_path, "rb"))
+    le = pickle.load(open(ART_SCN / "hybrid_label_encoder.pkl", "rb"))
+    fps = pickle.load(open(ART_SCN / "scannerfingerprints.pkl", "rb"))
+    keys = np.load(ART_SCN / "fp_keys.npy", allow_pickle=True).tolist()
+    scaler = pickle.load(open(ART_SCN / "hybrid_feat_scaler.pkl", "rb"))
     return le, fps, keys, scaler
 
 if scanner_ready:
     try:
         le_sc, scanner_fps, fp_keys, sc_scaler = load_artifacts()
-        st.success("✅ Scanner model and artifacts loaded successfully from GitHub!")
+        st.success("✅ Scanner model and artifacts loaded successfully!")
     except Exception as e:
         scanner_ready = False
         scanner_err = f"🛑 Failed loading artifacts: {e}"
