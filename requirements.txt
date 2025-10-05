@@ -3,7 +3,8 @@ opencv-python-headless>=4.10.0.84
 pywavelets>=1.6.0
 
 # Machine Learning / Deep Learning
-tensorflow==2.16.1
+tensorflow==2.20.0
+
 
 # Streamlit & utilities
 streamlit>=1.38.0
