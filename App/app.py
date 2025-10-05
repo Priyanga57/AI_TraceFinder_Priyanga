@@ -22,7 +22,7 @@ BASE_DIR = Path(r"C:\AI Trace Finder\App\models")
 ART_SCN = BASE_DIR
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.markdown(f"<h1 style='color:#ff6f61'>{APP_TITLE}</h1>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='color:white'>{APP_TITLE}</h1>", unsafe_allow_html=True)
 st.markdown("🔍 Upload a scanned page to analyze the **scanner source** & check for **tampering**.")
 
 # ----------------- Image utils -----------------
@@ -69,8 +69,8 @@ def fft_radial_energy(img, K=6):
     cy, cx = h // 2, w // 2
     yy, xx = np.ogrid[:h, :w]
     r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
-    bins = np.linspace(0, r.max() + 1e-6, K + 1)
-    feats = [float(mag[(r >= bins[i]) & (r < bins[i + 1])].mean() if ((r >= bins[i]) & (r < bins[i + 1])).any() else 0.0) for i in range(K)]
+    feats = [float(mag[(r >= bins[i]) & (r < bins[i + 1])].mean() if ((r >= bins[i]) & (r < bins[i + 1])).any() else 0.0)
+             for i, bins in enumerate(np.linspace(0, r.max() + 1e-6, K + 1)[:-1])]
     return np.asarray(feats, dtype=np.float32)
 
 # ----------------- Load Model & Artifacts -----------------
@@ -112,11 +112,13 @@ def make_scanner_feats(res):
 
 def try_scanner_predict(res):
     if not scanner_ready:
-        if scanner_err: st.info(f"Scanner-ID disabled: {scanner_err}")
+        if scanner_err: st.info(f"🛑 Scanner-ID disabled: {scanner_err}")
         return "Unknown", 0.0
     x_img = np.expand_dims(res, axis=(0, -1))
     x_feat = make_scanner_feats(res)
     ps = scanner_model.predict([x_img, x_feat], verbose=0).ravel()
+    if np.isnan(ps).any() or np.allclose(ps, 0):
+        return "Unknown", 0.0
     idx = int(np.argmax(ps))
     return str(le_sc.classes_[idx]), float(ps[idx] * 100.0)
 
