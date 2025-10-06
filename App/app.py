@@ -1,12 +1,13 @@
+# App/app.py
 import os, json, pickle, numpy as np, cv2, streamlit as st, joblib, tensorflow as tf
 from pathlib import Path
 from PIL import Image
 from skimage.feature import local_binary_pattern as sk_lbp
 
-from .inference import (
+from App.inference import (
     make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe,
     residualstats, fftresamplefeats, predict_from_bytes
-)  # Relative import inside App package
+)  # Absolute import for capitalized folder App
 
 st.set_page_config(page_title="🔍 AI Trace Finder - Scanner & Tamper Detection", layout="wide")
 
@@ -90,7 +91,7 @@ def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
         return "❌ No patches", 0.0
     X = np.array(patch_feats, np.float32)
 
-    expected_len = sc_patch.scale_.shape[0] if hasattr(sc_patch, 'scale_') else None
+    expected_len = sc_patch.scale_.shape[0] if hasattr(sc_patch, "scale_") else None
     if expected_len is not None and X.shape[1] != expected_len:
         raise ValueError(
             f"Feature dimension mismatch: scaler expects {expected_len} features but input has {X.shape[1]} features."
