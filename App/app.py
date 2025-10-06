@@ -1,10 +1,12 @@
-# App/app.py
 import os, json, pickle, numpy as np, cv2, streamlit as st, joblib, tensorflow as tf
 from pathlib import Path
 from PIL import Image
 from skimage.feature import local_binary_pattern as sk_lbp
 
-from .inference import make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe, residualstats, fftresamplefeats  # Relative import
+from .inference import (
+    make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe,
+    residualstats, fftresamplefeats, predict_from_bytes
+)  # Relative import inside App package
 
 st.set_page_config(page_title="🔍 AI Trace Finder - Scanner & Tamper Detection", layout="wide")
 
@@ -12,6 +14,7 @@ BASE = Path(__file__).resolve().parent
 MODELS = BASE / "models"
 TAMP_PATCH = MODELS / "artifacts_tamper_patch"
 TAMP_PAIR = MODELS / "artifacts_tamper_pair"
+
 
 @st.cache_resource
 def load_scanner_model():
@@ -22,6 +25,7 @@ def load_scanner_model():
     fp_keys = np.load(MODELS / "fp_keys.npy", allow_pickle=True).tolist()
     le = joblib.load(MODELS / "hybrid_label_encoder.pkl")
     return model, scaler, fps, fp_keys, le
+
 
 @st.cache_resource
 def load_tamper_models():
@@ -41,11 +45,13 @@ def load_tamper_models():
         st.warning(f"⚠️ Pair-level tamper model not loaded: {e}")
     return sc_patch, clf_patch, thr_patch, sc_pair, clf_pair, thr_pair
 
+
 def preprocess_image(img):
     if img.ndim == 3:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     img = cv2.resize(img, (256, 256), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
     return img
+
 
 def compute_residual(gray):
     import pywt
@@ -53,6 +59,7 @@ def compute_residual(gray):
     cH.fill(0); cV.fill(0); cD.fill(0)
     den = pywt.idwt2((cA, (cH, cV, cD)), "haar")
     return (gray - den).astype(np.float32)
+
 
 def predict_scanner(residual, model, scaler, fps, fp_keys, le):
     v_corr = [corr2d(residual, fps[k]) for k in fp_keys]
@@ -64,6 +71,7 @@ def predict_scanner(residual, model, scaler, fps, fp_keys, le):
     preds = model.predict([x_img, v_scaled], verbose=0).ravel()
     idx = int(np.argmax(preds))
     return str(le.classes_[idx]), float(preds[idx] * 100.0)
+
 
 def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
     if sc_patch is None or clf_patch is None:
@@ -84,7 +92,9 @@ def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
 
     expected_len = sc_patch.scale_.shape[0] if hasattr(sc_patch, 'scale_') else None
     if expected_len is not None and X.shape[1] != expected_len:
-        raise ValueError(f"Feature dimension mismatch: scaler expects {expected_len} features but input has {X.shape[1]} features.")
+        raise ValueError(
+            f"Feature dimension mismatch: scaler expects {expected_len} features but input has {X.shape[1]} features."
+        )
 
     Xs = sc_patch.transform(X)
     p = clf_patch.predict_proba(Xs)[:, 1]
@@ -93,9 +103,12 @@ def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
     verdict = "🔴 Tampered" if prob >= thr else "🟢 Clean"
     return verdict, prob
 
+
 st.title("🔍 AI Trace Finder")
 st.markdown("### 🧠 **Scanner Identification & Tamper Detection Tool**")
-st.markdown("Upload a scanned page (TIF/PNG/JPG/PDF) to identify its **scanner source** and check for **tampering.**")
+st.markdown(
+    "Upload a scanned page (TIF/PNG/JPG/PDF) to identify its **scanner source** and check for **tampering.**"
+)
 uploaded = st.file_uploader("📁 Upload Image", type=["png", "jpg", "jpeg", "tif", "tiff"])
 
 if uploaded:
