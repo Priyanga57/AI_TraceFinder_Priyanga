@@ -1,83 +1,61 @@
+# app/inference.py
 import numpy as np
-import pickle
-import json
-from tensorflow.keras.models import load_model
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.svm import SVC
 import cv2
-import os
+from skimage.feature import local_binary_pattern
 
-# Paths to models
-BASE_MODEL_PATH = os.path.join("..", "models")
-SCANNER_MODEL = os.path.join(BASE_MODEL_PATH, "scanner_hybrid.keras")
-LABEL_ENCODER = os.path.join(BASE_MODEL_PATH, "hybrid_label_encoder.pkl")
-SCALER = os.path.join(BASE_MODEL_PATH, "hybrid_feat_scaler.pkl")
-FP_KEYS = os.path.join(BASE_MODEL_PATH, "fp_keys.npy")
+# ---------------------------
+# FEATURE EXTRACTION HELPERS
+# ---------------------------
 
-# Tamper artifacts
-PATCH_DIR = os.path.join(BASE_MODEL_PATH, "artifacts_tamper_patch")
-PAIR_DIR = os.path.join(BASE_MODEL_PATH, "artifacts_tamper_pair")
+def corr2d(a, b):
+    """Compute normalized 2D correlation between two matrices."""
+    a_mean, b_mean = np.mean(a), np.mean(b)
+    num = np.sum((a - a_mean) * (b - b_mean))
+    den = np.sqrt(np.sum((a - a_mean)**2) * np.sum((b - b_mean)**2))
+    if den == 0:
+        return 0.0
+    return float(num / den)
 
-# Load scanner model
-scanner_model = load_model(SCANNER_MODEL)
-with open(LABEL_ENCODER, "rb") as f:
-    label_encoder = pickle.load(f)
-with open(SCALER, "rb") as f:
-    feat_scaler = pickle.load(f)
-fp_keys = np.load(FP_KEYS, allow_pickle=True)
 
-# Load tamper detection models
-with open(os.path.join(PATCH_DIR, "patch_scaler.pkl"), "rb") as f:
-    patch_scaler = pickle.load(f)
-with open(os.path.join(PATCH_DIR, "patch_svm_sig_calibrated.pkl"), "rb") as f:
-    patch_svm = pickle.load(f)
-with open(os.path.join(PATCH_DIR, "thresholds_patch.json"), "r") as f:
-    thresholds_patch = json.load(f)
-
-with open(os.path.join(PAIR_DIR, "pair_scaler.pkl"), "rb") as f:
-    pair_scaler = pickle.load(f)
-with open(os.path.join(PAIR_DIR, "pair_svm_sig.pkl"), "rb") as f:
-    pair_svm = pickle.load(f)
-with open(os.path.join(PAIR_DIR, "pair_thresholds_topk.json"), "r") as f:
-    pair_thresholds = json.load(f)
-
-# -------------------
-# Helper functions
-# -------------------
-def extract_features(image_path):
+def fft_radial_energy(img, bins=6):
     """
-    Extract features for scanner classification.
-    Here we assume fp_keys are features to be extracted.
+    Compute FFT-based radial energy distribution of the image.
+    Returns a histogram-like feature vector of frequency energies.
     """
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    img = cv2.resize(img, (128, 128))
-    features = img.flatten().astype(np.float32)
-    # normalize based on saved scaler
-    features = feat_scaler.transform([features])
-    return features
+    f = np.fft.fftshift(np.fft.fft2(img))
+    mag = np.abs(f)
+    cy, cx = np.array(mag.shape) // 2
+    y, x = np.indices(mag.shape)
+    r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+    r = (r / np.max(r)) * (bins - 1)
+    r = r.astype(np.int32)
+    feat = np.zeros(bins, dtype=np.float32)
+    for i in range(bins):
+        mask = (r == i)
+        if np.any(mask):
+            feat[i] = np.mean(mag[mask])
+    feat /= np.sum(feat) + 1e-8
+    return feat.tolist()
 
-def predict_scanner(image_path):
-    features = extract_features(image_path)
-    pred = scanner_model.predict(features)
-    label = label_encoder.inverse_transform([np.argmax(pred)])
-    return label[0]
 
-def predict_tamper_patch(image_path):
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    img = cv2.resize(img, (64, 64))
-    feat = img.flatten().astype(np.float32).reshape(1, -1)
-    feat = patch_scaler.transform(feat)
-    score = patch_svm.decision_function(feat)[0]
-    tamper = score > thresholds_patch["threshold"]
-    return tamper, float(score)
+def lbp_hist_safe(img, P=8, R=1.0):
+    """
+    Compute safe Local Binary Pattern histogram (uniform).
+    Used for scanner and tamper features.
+    """
+    lbp = local_binary_pattern(img, P, R, method="uniform")
+    n_bins = int(lbp.max() + 1)
+    hist, _ = np.histogram(lbp.ravel(), bins=n_bins, range=(0, n_bins))
+    hist = hist.astype(np.float32)
+    hist /= (hist.sum() + 1e-8)
+    return hist.tolist()
 
-def predict_tamper_pair(image_path1, image_path2):
-    img1 = cv2.imread(image_path1, cv2.IMREAD_GRAYSCALE)
-    img2 = cv2.imread(image_path2, cv2.IMREAD_GRAYSCALE)
-    img1 = cv2.resize(img1, (64, 64)).flatten()
-    img2 = cv2.resize(img2, (64, 64)).flatten()
-    feat = np.concatenate([img1, img2]).reshape(1, -1)
-    feat = pair_scaler.transform(feat)
-    score = pair_svm.decision_function(feat)[0]
-    tamper = score > pair_thresholds["threshold_topk"]
-    return tamper, float(score)
+
+def make_feats_from_res(residual, fps, fp_keys):
+    """
+    Combine correlation, FFT, and LBP features into one hybrid feature vector.
+    """
+    v_corr = [corr2d(residual, fps[k]) for k in fp_keys]
+    v_fft = fft_radial_energy(residual, 6)
+    v_lbp = lbp_hist_safe(residual, 8, 1.0)
+    return np.array(v_corr + v_fft + v_lbp, dtype=np.float32)
