@@ -1,8 +1,9 @@
-streamlit==1.26.1
 tensorflow==2.13.0
-opencv-python-headless
-numpy
-pillow
-scikit-image
-pywt
-scipy
+streamlit==1.26.1
+numpy==1.24.3
+opencv-python-headless==4.8.1.78
+pillow==10.0.1
+scikit-image==0.21.0
+pywavelets==1.4.1
+joblib==1.3.2
+scikit-learn==1.3.0
