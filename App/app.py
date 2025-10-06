@@ -4,17 +4,15 @@ from pathlib import Path
 from PIL import Image
 from skimage.feature import local_binary_pattern as sk_lbp
 
-from inference import make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe  # Local import for sibling module
+from inference import make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe  # local import
 
 st.set_page_config(page_title="🔍 AI Trace Finder - Scanner & Tamper Detection", layout="wide")
 
-# ---- Paths ----
 BASE = Path(__file__).resolve().parent
 MODELS = BASE / "models"
 TAMP_PATCH = MODELS / "artifacts_tamper_patch"
 TAMP_PAIR = MODELS / "artifacts_tamper_pair"
 
-# ---- Load Core Scanner Model ----
 @st.cache_resource
 def load_scanner_model():
     model = tf.keras.models.load_model(str(MODELS / "scanner_hybrid.keras"))
@@ -25,7 +23,6 @@ def load_scanner_model():
     le = joblib.load(MODELS / "hybrid_label_encoder.pkl")
     return model, scaler, fps, fp_keys, le
 
-# ---- Load Tamper Artifacts ----
 @st.cache_resource
 def load_tamper_models():
     try:
@@ -44,14 +41,12 @@ def load_tamper_models():
         st.warning(f"⚠️ Pair-level tamper model not loaded: {e}")
     return sc_patch, clf_patch, thr_patch, sc_pair, clf_pair, thr_pair
 
-# ---- Preprocessing ----
 def preprocess_image(img):
     if img.ndim == 3:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     img = cv2.resize(img, (256, 256), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
     return img
 
-# ---- Residual Extraction ----
 def compute_residual(gray):
     import pywt
     cA, (cH, cV, cD) = pywt.dwt2(gray, "haar")
@@ -59,7 +54,6 @@ def compute_residual(gray):
     den = pywt.idwt2((cA, (cH, cV, cD)), "haar")
     return (gray - den).astype(np.float32)
 
-# ---- Scanner Prediction ----
 def predict_scanner(residual, model, scaler, fps, fp_keys, le):
     v_corr = [corr2d(residual, fps[k]) for k in fp_keys]
     v_fft = fft_radial_energy(residual, 6)
@@ -71,7 +65,6 @@ def predict_scanner(residual, model, scaler, fps, fp_keys, le):
     idx = int(np.argmax(preds))
     return str(le.classes_[idx]), float(preds[idx] * 100.0)
 
-# ---- Tamper Prediction ----
 def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
     if sc_patch is None or clf_patch is None:
         return "❌ Not available", 0.0
@@ -86,6 +79,11 @@ def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
     if not patch_feats:
         return "❌ No patches", 0.0
     X = np.array(patch_feats, np.float32)
+
+    expected_len = sc_patch.scale_.shape[0] if hasattr(sc_patch, 'scale_') else None
+    if expected_len is not None and X.shape[1] != expected_len:
+        raise ValueError(f"Feature dimension mismatch: scaler expects {expected_len} features but input has {X.shape[1]} features.")
+
     Xs = sc_patch.transform(X)
     p = clf_patch.predict_proba(Xs)[:, 1]
     prob = float(np.mean(p))
@@ -93,7 +91,6 @@ def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
     verdict = "🔴 Tampered" if prob >= thr else "🟢 Clean"
     return verdict, prob
 
-# ---- App UI ----
 st.title("🔍 AI Trace Finder")
 st.markdown("### 🧠 **Scanner Identification & Tamper Detection Tool**")
 st.markdown("Upload a scanned page (TIF/PNG/JPG/PDF) to identify its **scanner source** and check for **tampering.**")
@@ -107,13 +104,10 @@ if uploaded:
     else:
         gray = preprocess_image(img)
         residual = compute_residual(gray)
-        # Load models
         model, scaler, fps, fp_keys, le = load_scanner_model()
         sc_patch, clf_patch, thr_patch, sc_pair, clf_pair, thr_pair = load_tamper_models()
-        # Scanner prediction
         with st.spinner("🔍 Identifying scanner..."):
             label, conf = predict_scanner(residual, model, scaler, fps, fp_keys, le)
-        # Tamper prediction
         with st.spinner("🧪 Checking tamper status..."):
             verdict, prob = predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch)
         col1, col2 = st.columns([1.2, 1.8])
