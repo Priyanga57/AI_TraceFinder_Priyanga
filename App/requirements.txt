@@ -1,6 +1,6 @@
-# Streamlit and compatible dependencies
+# Streamlit and UI dependencies
 streamlit==1.26.0
-pillow<10  # Must be <10 to satisfy Streamlit 1.26.0
+pillow<10
 rich>=10.14.0,<14
 markdown-it-py>=2.2.0,<4.0
 pygments>=2.13.0,<3.0
@@ -10,7 +10,7 @@ mdurl~=0.1
 opencv-python-headless>=4.10.0.84
 pywavelets>=1.6.0
 
-# TensorFlow compatible with Python 3.13
+# TensorFlow compatible with Streamlit
 tensorflow==2.14.0
 
 # Common ML / image processing libraries
@@ -18,7 +18,7 @@ numpy>=1.24.0
 scipy>=1.11.0
 matplotlib>=3.7.0
 
-# Optional: For audio / advanced processing
+# Optional audio / processing
 librosa>=0.10.0
 soundfile>=0.12.1
 
