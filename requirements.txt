@@ -1,9 +1,8 @@
-streamlit==1.39.0
-tensorflow-cpu==2.10.1
+streamlit>=1.28.0
+opencv-python
 numpy
-opencv-python-headless
-pillow
 scikit-image
-scikit-learn
-pywavelets
 joblib
+tensorflow>=2.12.0
+Pillow
+pywavelets
