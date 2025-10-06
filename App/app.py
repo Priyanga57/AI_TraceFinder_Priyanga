@@ -1,84 +1,96 @@
-# app.py
 import streamlit as st
-import numpy as np
-import cv2
-from pathlib import Path
-from inference import load_models, predict_scanner, infer_tamper_single
+from inference import predict_scanner, predict_tamper_patch, predict_tamper_pair
+from PIL import Image
+import pandas as pd
 
-# ---------------- CONFIG ----------------
-APP_TITLE = "🎯 TraceFinder - Scanner & Tamper Detector"
-IMG_SIZE = (256, 256)
-
-# ---------------- STREAMLIT SETTINGS ----------------
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-st.markdown(
-    """
-    <div style='background: linear-gradient(90deg, #6a11cb, #2575fc); padding: 20px; border-radius: 10px'>
-        <h1 style='color:white; margin:0;'>🎨 TraceFinder - Scanner & Tamper Detector</h1>
-    </div>
-    """, unsafe_allow_html=True
+# -----------------
+# Page config
+# -----------------
+st.set_page_config(
+    page_title="🖨 AI Trace Finder",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# ---------------- LOAD MODELS ONCE ----------------
-@st.cache_resource
-def load_all_models():
-    return load_models()
+st.title("🖨 AI Trace Finder - Scanner & Tamper Detection")
+st.markdown("Upload scanned image(s) to detect the **scanner model** and check for **tampering** 🕵️‍♀️🔍")
 
-models = load_all_models()
-hyb_model, le_sc, sc_sc, fps, fp_keys = models["scanner"]
-sc_tp, clf_tp, THRS_TP = models["tamper_patch"]
+# Sidebar for instructions
+with st.sidebar:
+    st.header("ℹ️ Instructions")
+    st.markdown("""
+    1. Upload a single image to detect the scanner and patch tampering.
+    2. Upload two images to check for pairwise tampering.
+    3. Results include:
+       - Predicted scanner model 🖨
+       - Tamper detection ✅ / ❌
+       - Confidence scores 📊
+    """)
 
-# ---------------- IMAGE UTILS ----------------
-def decode_upload_to_bgr(uploaded):
-    uploaded.seek(0)
-    buf = np.frombuffer(uploaded.read(), np.uint8)
-    bgr = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
-    if bgr is None:
-        raise ValueError("Cannot decode image")
-    return bgr
+# -----------------
+# Single Image Analysis
+# -----------------
+st.header("🖼 Single Image Scanner Prediction + Patch Tamper Detection")
+uploaded_file = st.file_uploader("Upload Image", type=["png","jpg","jpeg"], key="single_upload")
 
-def load_to_residual_from_bgr(bgr):
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim==3 else bgr
-    gray = cv2.resize(gray, IMG_SIZE, interpolation=cv2.INTER_AREA).astype(np.float32)/255.0
-    import pywt
-    cA, (cH, cV, cD) = pywt.dwt2(gray, "haar")
-    cH.fill(0); cV.fill(0); cD.fill(0)
-    den = pywt.idwt2((cA,(cH,cV,cD)),"haar")
-    return (gray - den).astype(np.float32)
+if uploaded_file:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded Image", use_column_width=True)
 
-def safe_show_image(img_bgr):
-    st.image(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB), use_container_width=True)
+    if st.button("🔎 Analyze Single Image"):
+        # Save temporarily
+        image_path = "temp_image.png"
+        image.save(image_path)
 
-# ---------------- FILE UPLOADER ----------------
-uploaded = st.file_uploader("Upload scanned page 🖨️", type=["tif","tiff","png","jpg","jpeg"])
+        # Scanner prediction
+        scanner = predict_scanner(image_path)
+        st.success(f"🖨 Predicted Scanner Model: **{scanner}**")
 
-if uploaded:
-    try:
-        bgr = decode_upload_to_bgr(uploaded)
-        residual = load_to_residual_from_bgr(bgr)
+        # Patch tamper prediction
+        tamper_patch, score_patch = predict_tamper_patch(image_path)
+        status = "❌ Tampered" if tamper_patch else "✅ Original"
+        st.warning(f"🛡 Patch Tamper Detection: **{status}** (Score: {score_patch:.3f})")
 
-        # SCANNER
-        scanner_name, scanner_conf = predict_scanner(residual, hyb_model, le_sc, sc_sc, fps, fp_keys)
+        # Dashboard-style metrics
+        st.subheader("📊 Single Image Metrics")
+        df_metrics = pd.DataFrame({
+            "Metric": ["Patch Tamper Score"],
+            "Value": [score_patch]
+        })
+        st.bar_chart(df_metrics.set_index("Metric"))
 
-        # TAMPER
-        tampered, p_img, thr, hits = infer_tamper_single(residual, sc_tp, clf_tp, THRS_TP)
-        verdict = "🛑 Tampered" if tampered else "✅ Clean"
+# -----------------
+# Pairwise Tamper Detection
+# -----------------
+st.header("🔗 Pairwise Tamper Detection")
+uploaded_files = st.file_uploader(
+    "Upload Two Images", type=["png","jpg","jpeg"], accept_multiple_files=True, key="pair_upload"
+)
 
-        colL, colR = st.columns([1.5,2])
-        with colR: safe_show_image(bgr)
-        with colL:
-            st.markdown(f"""
-            <div style='padding:16px;border-radius:12px;background:#1c1f26;color:white;'>
-                <h3>🕵️ Scanner Identification</h3>
-                <p style='font-size:18px;'>{scanner_name} ({scanner_conf:.1f}% confidence)</p>
-                <hr style='border:1px solid #555'>
-                <h3>📊 Tamper Detection</h3>
-                <p style='font-size:18px;'>{verdict}</p>
-            </div>
-            """, unsafe_allow_html=True)
-    except Exception as e:
-        st.error("Error during inference")
-        st.code(str(e))
-else:
-    st.info("Drag and drop a scanned TIF/TIFF/PNG/JPG to detect scanner & tamper 🖨️🕵️")
+if uploaded_files and len(uploaded_files) == 2:
+    image1 = Image.open(uploaded_files[0])
+    image2 = Image.open(uploaded_files[1])
+    st.image([image1, image2], caption=["Image 1", "Image 2"], width=300)
+
+    if st.button("🔎 Analyze Pairwise Tamper"):
+        # Save temporarily
+        uploaded_files[0].save("temp_image1.png")
+        uploaded_files[1].save("temp_image2.png")
+
+        tamper_pair, score_pair = predict_tamper_pair("temp_image1.png", "temp_image2.png")
+        status_pair = "❌ Tampered" if tamper_pair else "✅ Original"
+        st.warning(f"🛡 Pairwise Tamper Detection: **{status_pair}** (Score: {score_pair:.3f})")
+
+        # Pairwise dashboard
+        st.subheader("📊 Pairwise Metrics")
+        df_pair_metrics = pd.DataFrame({
+            "Metric": ["Pairwise Tamper Score"],
+            "Value": [score_pair]
+        })
+        st.bar_chart(df_pair_metrics.set_index("Metric"))
+
+# -----------------
+# Footer
+# -----------------
+st.markdown("---")
+st.markdown("Developed with ❤️ using **Streamlit & TensorFlow**")
