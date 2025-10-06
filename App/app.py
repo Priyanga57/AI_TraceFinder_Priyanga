@@ -4,7 +4,7 @@ from pathlib import Path
 from PIL import Image
 from skimage.feature import local_binary_pattern as sk_lbp
 
-from inference import make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe, residualstats, fftresamplefeats  # Updated imports
+from .inference import make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe, residualstats, fftresamplefeats  # Relative import
 
 st.set_page_config(page_title="🔍 AI Trace Finder - Scanner & Tamper Detection", layout="wide")
 
