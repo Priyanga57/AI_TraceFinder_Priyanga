@@ -4,7 +4,7 @@ from pathlib import Path
 from PIL import Image
 from skimage.feature import local_binary_pattern as sk_lbp
 
-from inference import make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe  # local import
+from inference import make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe, residualstats, fftresamplefeats  # Updated imports
 
 st.set_page_config(page_title="🔍 AI Trace Finder - Scanner & Tamper Detection", layout="wide")
 
@@ -74,21 +74,17 @@ def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
             p = residual[y:y+64, x:x+64]
             lbp = lbp_hist_safe(p, 8, 1.0)
             fft6 = fft_radial_energy(p, 6)
-            # Debug: print feature lengths to Streamlit
-            st.write(f"Patch ({y},{x}): LBP length={len(lbp)}, FFT length={len(fft6)}")
-            feat = np.concatenate([lbp, fft6], axis=0)
+            res3 = residualstats(p)
+            rsp3 = fftresamplefeats(p)
+            feat = np.concatenate([lbp, fft6, res3, rsp3], axis=0)
             patch_feats.append(feat)
     if not patch_feats:
         return "❌ No patches", 0.0
     X = np.array(patch_feats, np.float32)
 
     expected_len = sc_patch.scale_.shape[0] if hasattr(sc_patch, 'scale_') else None
-    if expected_len is not None:
-        st.write(f"Scaler expects {expected_len} features, input feature vector length: {X.shape[1]}")
-        if X.shape[1] != expected_len:
-            raise ValueError(
-                f"Feature dimension mismatch: scaler expects {expected_len} features but input has {X.shape[1]} features."
-            )
+    if expected_len is not None and X.shape[1] != expected_len:
+        raise ValueError(f"Feature dimension mismatch: scaler expects {expected_len} features but input has {X.shape[1]} features.")
 
     Xs = sc_patch.transform(X)
     p = clf_patch.predict_proba(Xs)[:, 1]
