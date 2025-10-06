@@ -1,27 +1,27 @@
-# Streamlit and UI dependencies
+# --- Streamlit UI ---
 streamlit==1.26.0
 pillow<10
 rich>=10.14.0,<14
 markdown-it-py>=2.2.0,<4.0
 pygments>=2.13.0,<3.0
 mdurl~=0.1
+altair<6,>=4.0
+blinker<2,>=1.0.0
+cachetools<6,>=4.0
+click<9,>=7.0
+importlib-metadata<7,>=1.4
 
-# AI Trace Finder dependencies
-opencv-python-headless>=4.10.0.84
-pywavelets>=1.6.0
-
-# TensorFlow compatible with Streamlit
+# --- AI / ML Dependencies ---
 tensorflow==2.14.0
+numpy>=1.24.0,<1.27
+scipy>=1.11.0,<1.17
+matplotlib>=3.7.0,<3.11
+scikit-learn>=1.3.0,<1.8
 
-# Common ML / image processing libraries
-numpy>=1.24.0
-scipy>=1.11.0
-matplotlib>=3.7.0
+# --- Image / Signal Processing ---
+opencv-python-headless>=4.10.0.84,<4.13
+pywavelets>=1.6.0,<2.0
 
-# Optional audio / processing
-librosa>=0.10.0
-soundfile>=0.12.1
-
-# Utilities
-pandas>=2.1.0
-scikit-learn>=1.3.0
+# --- Audio / Speech Processing ---
+librosa>=0.10.0,<0.12
+soundfile>=0.12.1,<0.14
