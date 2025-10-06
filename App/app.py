@@ -1,11 +1,10 @@
-# app/app.py
+# App/app.py
 import os, json, pickle, numpy as np, cv2, streamlit as st, joblib, tensorflow as tf
 from pathlib import Path
 from PIL import Image
 from skimage.feature import local_binary_pattern as sk_lbp
 
-# Correct import with relative path
-from .inference import make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe
+from App.inference import make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe  # Absolute import with root folder name 'App'
 
 st.set_page_config(page_title="🔍 AI Trace Finder - Scanner & Tamper Detection", layout="wide")
 
