@@ -1,11 +1,10 @@
 streamlit>=1.18
 opencv-python-headless
 scikit-image
-numpy
-tensorflow>=2.8
-joblib
-pillow
-scikit-learn
 pywavelets
-matplotlib
+numpy
+joblib
+tensorflow>=2.8
+pillow
 PyMuPDF
+scikit-learn
