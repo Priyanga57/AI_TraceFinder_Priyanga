@@ -20,10 +20,11 @@ st.markdown(
     """
     <div style='text-align:center; padding-top:8px;'>
         <h1>🔍 TraceFinder</h1>
-        <h4 style='color:#6a7ff7;'>Scanner Identification & Tamper Detection <span style='font-size:36px;'>🖨️</span></h4>
-        <p style='color:#aaaaff; font-size:20px;'>Upload a scanned image or PDF below 👇</p>
+        <h4 style='color:#6a7ff7;'>Scanner Identification & Tamper Detection 🖨️</h4>
+        <p style='color:#aaaaff; font-size:20px;'>Upload a scanned image or PDF 👇</p>
     </div>
-    """, unsafe_allow_html=True
+    """,
+    unsafe_allow_html=True,
 )
 
 def pdf_bytes_to_bgr(file_bytes: bytes):
@@ -48,14 +49,17 @@ def decode_upload_to_bgr(uploaded):
         return bgr, name
     buf = np.frombuffer(raw, np.uint8)
     bgr = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
-    if bgr is None: raise ValueError("❌ Could not decode file")
+    if bgr is None:
+        raise ValueError("❌ Could not decode file")
     return bgr, name
 
 def load_to_residual_from_bgr(bgr):
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
     gray = cv2.resize(gray, IMG_SIZE, interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
     cA, (cH, cV, cD) = pywt.dwt2(gray, "haar")
-    cH.fill(0); cV.fill(0); cD.fill(0)
+    cH.fill(0)
+    cV.fill(0)
+    cD.fill(0)
     den = pywt.idwt2((cA, (cH, cV, cD)), "haar")
     return (gray - den).astype(np.float32)
 
@@ -69,9 +73,12 @@ def lbp_hist_safe(img, P=8, R=1.0):
     return hist.astype(np.float32)
 
 def fft_radial_energy(img, K=6):
-    f = np.fft.fftshift(np.fft.fft2(img)); mag = np.abs(f)
-    h, w = mag.shape; cy, cx = h // 2, w // 2
-    yy, xx = np.ogrid[:h, :w]; r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    f = np.fft.fftshift(np.fft.fft2(img))
+    mag = np.abs(f)
+    h, w = mag.shape
+    cy, cx = h // 2, w // 2
+    yy, xx = np.ogrid[:h, :w]
+    r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     bins = np.linspace(0, r.max() + 1e-6, K + 1)
     feats = []
     for i in range(K):
@@ -79,48 +86,56 @@ def fft_radial_energy(img, K=6):
         feats.append(float(mag[m].mean() if m.any() else 0.0))
     return np.asarray(feats, dtype=np.float32)
 
-def corr2d(a, b):
-    a, b = a.astype(np.float32).ravel(), b.astype(np.float32).ravel()
-    a -= a.mean(); b -= b.mean()
-    d = np.linalg.norm(a) * np.linalg.norm(b)
-    return float((a @ b) / d) if d != 0 else 0.0
+def residual_stats(img):
+    return np.asarray([float(img.mean()), float(img.std()), float(np.mean(np.abs(img)))], dtype=np.float32)
 
-# ——— Model artifacts loading ———
-MODEL_PATH  = BASE_DIR / "models" / "scanner_hybrid.keras"
-LE_PATH     = BASE_DIR / "models" / "hybrid_label_encoder.pkl"
+def fft_resample_feats(img):
+    f = np.fft.fftshift(np.fft.fft2(img))
+    mag = np.abs(f)
+    h, w = mag.shape
+    cy, cx = h // 2, w // 2
+    yy, xx = np.ogrid[:h, :w]
+    r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    rmax = r.max() + 1e-6
+    b1 = (r >= 0.25 * rmax) & (r < 0.35 * rmax)
+    b2 = (r >= 0.35 * rmax) & (r < 0.50 * rmax)
+    e1 = float(mag[b1].mean() if b1.any() else 0.0)
+    e2 = float(mag[b2].mean() if b2.any() else 0.0)
+    ratio = float(e2 / (e1 + 1e-8))
+    return np.asarray([e1, e2, ratio], dtype=np.float32)
+
+MODEL_PATH = BASE_DIR / "models" / "scanner_hybrid.keras"
+LE_PATH = BASE_DIR / "models" / "hybrid_label_encoder.pkl"
 SCALER_PATH = BASE_DIR / "models" / "hybrid_feat_scaler.pkl"
-FPS_PATH    = BASE_DIR / "models" / "scannerfingerprints.pkl"
-FP_KEYS     = BASE_DIR / "models" / "fp_keys.npy"
-TAMP_PATCH  = BASE_DIR / "models" / "artifacts_tamper_patch"
+FPS_PATH = BASE_DIR / "models" / "scannerfingerprints.pkl"
+FP_KEYS = BASE_DIR / "models" / "fp_keys.npy"
+TAMP_PATCH = BASE_DIR / "models" / "artifacts_tamper_patch"
 
-hyb_model  = tf.keras.models.load_model(str(MODEL_PATH))
-le_inf     = joblib.load(LE_PATH)
+hyb_model = tf.keras.models.load_model(str(MODEL_PATH))
+le_inf = joblib.load(LE_PATH)
 scaler_inf = joblib.load(SCALER_PATH)
 with open(FPS_PATH, "rb") as f:
     scanner_fps_inf = pickle.load(f)
 fp_keys_inf = np.load(FP_KEYS, allow_pickle=True).tolist()
 
-# Tamper patch model loading
 try:
     sc_patch = joblib.load(TAMP_PATCH / "patch_scaler.pkl")
     clf_patch = joblib.load(TAMP_PATCH / "patch_svm_sig_calibrated.pkl")
     thr_patch = json.load(open(TAMP_PATCH / "thresholds_patch.json"))
-    tamper_model_ok = True
 except Exception as e:
     sc_patch, clf_patch, thr_patch = None, None, None
-    tamper_model_ok = False
     st.warning(f"Tamper model not loaded: {e}")
 
 def make_feats_from_res(res):
     v_corr = [corr2d(res, scanner_fps_inf[k]) for k in fp_keys_inf]
-    v_fft  = fft_radial_energy(res, K=6)
-    v_lbp  = lbp_hist_safe(res, P=8, R=1.0)
+    v_fft = fft_radial_energy(res, K=6)
+    v_lbp = lbp_hist_safe(res, P=8, R=1.0)
     v = np.array(v_corr + list(v_fft) + list(v_lbp), dtype=np.float32).reshape(1, -1)
     return scaler_inf.transform(v)
 
 def predict_scanner(residual):
     x_img = np.expand_dims(residual, axis=(0, -1))
-    x_ft  = make_feats_from_res(residual)
+    x_ft = make_feats_from_res(residual)
     ps = hyb_model.predict([x_img, x_ft], verbose=0).ravel()
     idx = int(np.argmax(ps))
     return str(le_inf.classes_[idx]), float(ps[idx] * 100.0)
@@ -129,20 +144,21 @@ def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
     if sc_patch is None or clf_patch is None:
         return "❌ Not available", 0.0
     patch_feats = []
-    # Extract patches, size 64x64, stride 64
     for y in range(0, residual.shape[0] - 64 + 1, 64):
         for x in range(0, residual.shape[1] - 64 + 1, 64):
-            p = residual[y:y+64, x:x+64]
+            p = residual[y:y + 64, x:x + 64]
             lbp = lbp_hist_safe(p, 8, 1.0)
             fft6 = fft_radial_energy(p, 6)
-            feat = np.concatenate([lbp, fft6], axis=0)
+            res3 = residual_stats(p)
+            rsp3 = fft_resample_feats(p)
+            feat = np.concatenate([lbp, fft6, res3, rsp3], axis=0)
             patch_feats.append(feat)
     if not patch_feats:
         return "❌ No patches", 0.0
     X = np.array(patch_feats, np.float32)
     expected_len = sc_patch.scale_.shape[0] if hasattr(sc_patch, "scale_") else None
     if expected_len is not None and X.shape[1] != expected_len:
-        raise ValueError(f"Scaler expects {expected_len} features but input has {X.shape[1]}.")
+        raise ValueError(f"Scaler expects {expected_len} features but got {X.shape[1]}.")
     Xs = sc_patch.transform(X)
     p = clf_patch.predict_proba(Xs)[:, 1]
     prob = float(np.mean(p))
@@ -151,6 +167,7 @@ def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
     return verdict, prob
 
 uploaded = st.file_uploader("📁 Upload scanned page (TIF/TIFF/JPG/PNG/PDF)", type=["tif", "tiff", "jpg", "jpeg", "png", "pdf"])
+
 def safe_show_image(img_bgr):
     rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     st.image(rgb, caption="🖼️ Uploaded Image", use_container_width=True)
