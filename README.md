@@ -88,8 +88,6 @@ Data and File Structure (in Github)
 
 AI-Trace-Finder/
 ├── .gitignore                                  #Ignore .venv, __pycache__, etc.
-├── .streamlit/                                 # Streamlit configuration
-│   ├── config.toml                         # Theme, layout, and port settings
 │   
 ├── App/                                       # Core application code
 │   ├── app.py                              # Streamlit UI entry point
