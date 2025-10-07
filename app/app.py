@@ -1,141 +1,152 @@
-# App/app.py
-
-import os, json, pickle, numpy as np, cv2, streamlit as st, joblib, tensorflow as tf
+import os, re, glob, math, json, pickle
 from pathlib import Path
-from PIL import Image
+import numpy as np
+import streamlit as st
+import cv2, pywt
+
+# PDF support
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except Exception:
+    PYMUPDF_AVAILABLE = False
+
 from skimage.feature import local_binary_pattern as sk_lbp
-from App.inference import (
-    make_feats_from_res, corr2d, fft_radial_energy, lbp_hist_safe, predict_from_bytes
+
+# --- CONFIG ---
+APP_TITLE = "🔍 TraceFinder — Scanner Identification & Tamper Detection 🕵️‍♂️"
+IMG_SIZE = (256, 256)
+BASE_DIR = Path(__file__).resolve().parent
+
+st.set_page_config(page_title=APP_TITLE, page_icon="🔍", layout="wide")
+
+st.markdown(
+    """
+    <div style='text-align:center; padding-top:8px;'>
+        <h1>🔍 TraceFinder</h1>
+        <h4 style='color:#6a7ff7;'>Forensic Scanner Identification <span style='font-size:36px;'>🖨️</span></h4>
+        <p style='color:#aaaaff; font-size:20px;'>Instantly analyze any scanned image or PDF.<br><span style='font-size:28px;'>✨</span> See source & confidence results below! <span style='font-size:28px;'>📊</span></p>
+    </div>
+    """, unsafe_allow_html=True
 )
 
-st.set_page_config(page_title="🔍 AI Trace Finder - Scanner & Tamper Detection", layout="wide")
+def pdf_bytes_to_bgr(file_bytes: bytes):
+    if not PYMUPDF_AVAILABLE:
+        raise ImportError("PDF support not available. Add 'pymupdf' to requirements.txt and redeploy.")
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    page = doc.load_page(0)
+    pix = page.get_pixmap(dpi=300)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-BASE = Path(__file__).resolve().parent
-MODELS = BASE / "models"
-TAMP_PATCH = MODELS / "artifacts_tamper_patch"
-TAMP_PAIR = MODELS / "artifacts_tamper_pair"
-
-@st.cache_resource
-def load_scanner_model():
-    model = tf.keras.models.load_model(str(MODELS / "scanner_hybrid.keras"))
-    scaler = joblib.load(MODELS / "hybrid_feat_scaler.pkl")
-    with open(MODELS / "scannerfingerprints.pkl", "rb") as f:
-        fps = pickle.load(f)
-    fp_keys = np.load(MODELS / "fp_keys.npy", allow_pickle=True).tolist()
-    le = joblib.load(MODELS / "hybrid_label_encoder.pkl")
-    return model, scaler, fps, fp_keys, le
-
-@st.cache_resource
-def load_tamper_models():
+def decode_upload_to_bgr(uploaded):
     try:
-        sc_patch = joblib.load(TAMP_PATCH / "patch_scaler.pkl")
-        clf_patch = joblib.load(TAMP_PATCH / "patch_svm_sig_calibrated.pkl")
-        thr_patch = json.load(open(TAMP_PATCH / "thresholds_patch.json"))
-    except Exception as e:
-        sc_patch, clf_patch, thr_patch = None, None, None
-        st.warning(f"⚠️ Patch-level tamper model not loaded: {e}")
-    try:
-        sc_pair = joblib.load(TAMP_PAIR / "pair_scaler.pkl")
-        clf_pair = joblib.load(TAMP_PAIR / "pair_svm_sig.pkl")
-        thr_pair = json.load(open(TAMP_PAIR / "pair_thresholds_topk.json"))
-    except Exception as e:
-        sc_pair, clf_pair, thr_pair = None, None, None
-        st.warning(f"⚠️ Pair-level tamper model not loaded: {e}")
-    return sc_patch, clf_patch, thr_patch, sc_pair, clf_pair, thr_pair
+        uploaded.seek(0)
+    except Exception:
+        pass
+    raw = uploaded.read()
+    name = uploaded.name
+    ext = os.path.splitext(name.lower())[-1]
+    if ext == ".pdf":
+        bgr = pdf_bytes_to_bgr(raw)
+        return bgr, name
+    buf = np.frombuffer(raw, np.uint8)
+    bgr = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+    if bgr is None:
+        raise ValueError("❌ Could not decode file")
+    return bgr, name
 
-def preprocess_image(img):
-    if img.ndim == 3:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    img = cv2.resize(img, (256, 256), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
-    return img
-
-def compute_residual(gray):
-    import pywt
+def load_to_residual_from_bgr(bgr):
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
+    gray = cv2.resize(gray, IMG_SIZE, interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
     cA, (cH, cV, cD) = pywt.dwt2(gray, "haar")
     cH.fill(0); cV.fill(0); cD.fill(0)
     den = pywt.idwt2((cA, (cH, cV, cD)), "haar")
     return (gray - den).astype(np.float32)
 
-def predict_scanner(residual, model, scaler, fps, fp_keys, le):
-    v_corr = [corr2d(residual, fps[k]) for k in fp_keys]
-    v_fft = fft_radial_energy(residual, 6)
-    v_lbp = lbp_hist_safe(residual, 8, 1.0)
-    v = np.array(v_corr + v_fft + v_lbp, dtype=np.float32).reshape(1, -1)
-    v_scaled = scaler.transform(v)
+def lbp_hist_safe(img, P=8, R=1.0):
+    rng = float(np.ptp(img))
+    g = np.zeros_like(img, dtype=np.float32) if rng < 1e-12 else (img - float(np.min(img))) / (rng + 1e-8)
+    g8 = (g * 255.0).astype(np.uint8)
+    codes = sk_lbp(g8, P=P, R=R, method="uniform")
+    n_bins = P + 2
+    hist, _ = np.histogram(codes, bins=np.arange(n_bins + 1), density=True)
+    return hist.astype(np.float32)
+
+def fft_radial_energy(img, K=6):
+    f = np.fft.fftshift(np.fft.fft2(img)); mag = np.abs(f)
+    h, w = mag.shape; cy, cx = h // 2, w // 2
+    yy, xx = np.ogrid[:h, :w]; r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    bins = np.linspace(0, r.max() + 1e-6, K + 1)
+    feats = []
+    for i in range(K):
+        m = (r >= bins[i]) & (r < bins[i + 1])
+        feats.append(float(mag[m].mean() if m.any() else 0.0))
+    return np.asarray(feats, dtype=np.float32)
+
+def corr2d(a, b):
+    a, b = a.astype(np.float32).ravel(), b.astype(np.float32).ravel()
+    a -= a.mean(); b -= b.mean()
+    d = np.linalg.norm(a) * np.linalg.norm(b)
+    return float((a @ b) / d) if d != 0 else 0.0
+
+import joblib, tensorflow as tf
+MODEL_PATH  = BASE_DIR / "models" / "scanner_hybrid.keras"
+LE_PATH     = BASE_DIR / "models" / "hybrid_label_encoder.pkl"
+SCALER_PATH = BASE_DIR / "models" / "hybrid_feat_scaler.pkl"
+FPS_PATH    = BASE_DIR / "models" / "scannerfingerprints.pkl"
+FP_KEYS     = BASE_DIR / "models" / "fp_keys.npy"
+
+hyb_model  = tf.keras.models.load_model(str(MODEL_PATH))
+le_inf     = joblib.load(LE_PATH)
+scaler_inf = joblib.load(SCALER_PATH)
+with open(FPS_PATH, "rb") as f:
+    scanner_fps_inf = pickle.load(f)
+fp_keys_inf = np.load(FP_KEYS, allow_pickle=True).tolist()
+
+def make_feats_from_res(res):
+    v_corr = [corr2d(res, scanner_fps_inf[k]) for k in fp_keys_inf]
+    v_fft  = fft_radial_energy(res, K=6)
+    v_lbp  = lbp_hist_safe(res, P=8, R=1.0)
+    v = np.array(v_corr + list(v_fft) + list(v_lbp), dtype=np.float32).reshape(1, -1)
+    return scaler_inf.transform(v)
+
+def predict_scanner(residual):
     x_img = np.expand_dims(residual, axis=(0, -1))
-    preds = model.predict([x_img, v_scaled], verbose=0).ravel()
-    idx = int(np.argmax(preds))
-    return str(le.classes_[idx]), float(preds[idx] * 100.0)
+    x_ft  = make_feats_from_res(residual)
+    ps = hyb_model.predict([x_img, x_ft], verbose=0).ravel()
+    idx = int(np.argmax(ps))
+    return str(le_inf.classes_[idx]), float(ps[idx] * 100.0)
 
-def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
-    if sc_patch is None or clf_patch is None:
-        return "❌ Not available", 0.0
-    patch_feats = []
-    for y in range(0, residual.shape[0] - 64, 64):
-        for x in range(0, residual.shape[1] - 64, 64):
-            p = residual[y:y+64, x:x+64]
-            lbp = lbp_hist_safe(p, 8, 1.0)
-            fft6 = fft_radial_energy(p, 6)
-            # Quick stats if you need, else use just lbp and fft
-            feat = np.concatenate([lbp, fft6], axis=0)
-            patch_feats.append(feat)
-    if not patch_feats:
-        return "❌ No patches", 0.0
-    X = np.array(patch_feats, np.float32)
-
-    expected_len = sc_patch.scale_.shape[0] if hasattr(sc_patch, "scale_") else None
-    if expected_len is not None and X.shape[1] != expected_len:
-        raise ValueError(
-            f"Feature dimension mismatch: scaler expects {expected_len} features but input has {X.shape[1]} features."
-        )
-
-    Xs = sc_patch.transform(X)
-    p = clf_patch.predict_proba(Xs)[:, 1]
-    prob = float(np.mean(p))
-    thr = thr_patch.get("global", 0.5)
-    verdict = "🔴 Tampered" if prob >= thr else "🟢 Clean"
-    return verdict, prob
-
-st.title("🔍 AI Trace Finder")
-st.markdown("### 🧠 **Scanner Identification & Tamper Detection Tool**")
-st.markdown(
-    "Upload a scanned page (TIF/PNG/JPG/PDF) to identify its **scanner source** and check for **tampering.**"
-)
-uploaded = st.file_uploader("📁 Upload Image", type=["png", "jpg", "jpeg", "tif", "tiff", "pdf"])
+st.write("")
+uploaded = st.file_uploader("📁 Upload your scanned page (TIF/TIFF/JPG/PNG/PDF)", type=["tif", "tiff", "jpg", "jpeg", "png", "pdf"], label_visibility="visible")
+def safe_show_image(img_bgr):
+    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    st.image(rgb, use_column_width=True, caption="🖼️ Uploaded Image")
 
 if uploaded:
-    file_bytes = np.frombuffer(uploaded.read(), np.uint8)
-    ext = os.path.splitext(uploaded.name.lower())[-1]
-    if ext == ".pdf":
-        import fitz
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        page = doc.load_page(0)
-        pix = page.get_pixmap(dpi=300)
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-        if pix.n == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    else:
-        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if img is None:
-        st.error("⚠️ Could not decode image.")
-    else:
-        gray = preprocess_image(img)
-        residual = compute_residual(gray)
-        model, scaler, fps, fp_keys, le = load_scanner_model()
-        sc_patch, clf_patch, thr_patch, sc_pair, clf_pair, thr_pair = load_tamper_models()
-        with st.spinner("🔍 Identifying scanner..."):
-            label, conf = predict_scanner(residual, model, scaler, fps, fp_keys, le)
-        with st.spinner("🧪 Checking tamper status..."):
-            verdict, prob = predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch)
-        col1, col2 = st.columns([1.2, 1.8])
+    try:
+        bgr, display_name = decode_upload_to_bgr(uploaded)
+        residual = load_to_residual_from_bgr(bgr)
+        label, conf = predict_scanner(residual)
+        col1, col2 = st.columns([1.1, 1.9], gap="large")
         with col2:
-            st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Uploaded Image", use_column_width=True)
+            safe_show_image(bgr)
         with col1:
-            st.success(f"🖨️ **Scanner:** {label}")
-            st.info(f"📊 Confidence: {conf:.2f}%")
-            st.write("---")
-            st.write(f"🧾 **Tamper Status:** {verdict}")
-            st.write(f"📈 Probability: `{prob:.3f}`")
+            st.markdown(
+                f"""
+                <div style='padding:22px;border-radius:12px;background:#1d2337;border:2px solid #6a7ff7;'>
+                    <div style='font-size:23px;color:#7B98EE;'>🖨️ Scanner</div>
+                    <div style='font-size:32px;margin-top:10px;font-weight:bold;'>{label}</div>
+                    <div style='font-size:16px;color:#fddcff;margin-top:12px;'>🎯 Confidence: <b>{conf:.1f}%</b></div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+    except Exception as e:
+        st.error("🚨 Inference error")
+        st.code(str(e))
 else:
-    st.info("👆 Upload a scanned image to begin analysis.")
+    st.info("🧭 Drag-and-drop or select a scanned image/PDF above to analyze.")
