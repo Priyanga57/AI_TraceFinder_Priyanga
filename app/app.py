@@ -1,19 +1,15 @@
-import os, re, glob, math, json, pickle
+import os, json, pickle, numpy as np, cv2, streamlit as st, pywt
 from pathlib import Path
-import numpy as np
-import streamlit as st
-import cv2, pywt
+import joblib, tensorflow as tf
 
-# PDF support
 try:
-    import fitz  # PyMuPDF
+    import fitz
     PYMUPDF_AVAILABLE = True
 except Exception:
     PYMUPDF_AVAILABLE = False
 
 from skimage.feature import local_binary_pattern as sk_lbp
 
-# --- CONFIG ---
 APP_TITLE = "🔍 TraceFinder — Scanner Identification & Tamper Detection 🕵️‍♂️"
 IMG_SIZE = (256, 256)
 BASE_DIR = Path(__file__).resolve().parent
@@ -24,8 +20,8 @@ st.markdown(
     """
     <div style='text-align:center; padding-top:8px;'>
         <h1>🔍 TraceFinder</h1>
-        <h4 style='color:#6a7ff7;'>Forensic Scanner Identification <span style='font-size:36px;'>🖨️</span></h4>
-        <p style='color:#aaaaff; font-size:20px;'>Instantly analyze any scanned image or PDF.<br><span style='font-size:28px;'>✨</span> See source & confidence results below! <span style='font-size:28px;'>📊</span></p>
+        <h4 style='color:#6a7ff7;'>Scanner Identification & Tamper Detection <span style='font-size:36px;'>🖨️</span></h4>
+        <p style='color:#aaaaff; font-size:20px;'>Upload a scanned image or PDF below 👇</p>
     </div>
     """, unsafe_allow_html=True
 )
@@ -42,10 +38,8 @@ def pdf_bytes_to_bgr(file_bytes: bytes):
     return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 def decode_upload_to_bgr(uploaded):
-    try:
-        uploaded.seek(0)
-    except Exception:
-        pass
+    try: uploaded.seek(0)
+    except Exception: pass
     raw = uploaded.read()
     name = uploaded.name
     ext = os.path.splitext(name.lower())[-1]
@@ -54,8 +48,7 @@ def decode_upload_to_bgr(uploaded):
         return bgr, name
     buf = np.frombuffer(raw, np.uint8)
     bgr = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
-    if bgr is None:
-        raise ValueError("❌ Could not decode file")
+    if bgr is None: raise ValueError("❌ Could not decode file")
     return bgr, name
 
 def load_to_residual_from_bgr(bgr):
@@ -92,12 +85,13 @@ def corr2d(a, b):
     d = np.linalg.norm(a) * np.linalg.norm(b)
     return float((a @ b) / d) if d != 0 else 0.0
 
-import joblib, tensorflow as tf
+# ——— Model artifacts loading ———
 MODEL_PATH  = BASE_DIR / "models" / "scanner_hybrid.keras"
 LE_PATH     = BASE_DIR / "models" / "hybrid_label_encoder.pkl"
 SCALER_PATH = BASE_DIR / "models" / "hybrid_feat_scaler.pkl"
 FPS_PATH    = BASE_DIR / "models" / "scannerfingerprints.pkl"
 FP_KEYS     = BASE_DIR / "models" / "fp_keys.npy"
+TAMP_PATCH  = BASE_DIR / "models" / "artifacts_tamper_patch"
 
 hyb_model  = tf.keras.models.load_model(str(MODEL_PATH))
 le_inf     = joblib.load(LE_PATH)
@@ -105,6 +99,17 @@ scaler_inf = joblib.load(SCALER_PATH)
 with open(FPS_PATH, "rb") as f:
     scanner_fps_inf = pickle.load(f)
 fp_keys_inf = np.load(FP_KEYS, allow_pickle=True).tolist()
+
+# Tamper patch model loading
+try:
+    sc_patch = joblib.load(TAMP_PATCH / "patch_scaler.pkl")
+    clf_patch = joblib.load(TAMP_PATCH / "patch_svm_sig_calibrated.pkl")
+    thr_patch = json.load(open(TAMP_PATCH / "thresholds_patch.json"))
+    tamper_model_ok = True
+except Exception as e:
+    sc_patch, clf_patch, thr_patch = None, None, None
+    tamper_model_ok = False
+    st.warning(f"Tamper model not loaded: {e}")
 
 def make_feats_from_res(res):
     v_corr = [corr2d(res, scanner_fps_inf[k]) for k in fp_keys_inf]
@@ -120,27 +125,54 @@ def predict_scanner(residual):
     idx = int(np.argmax(ps))
     return str(le_inf.classes_[idx]), float(ps[idx] * 100.0)
 
-st.write("")
-uploaded = st.file_uploader("📁 Upload your scanned page (TIF/TIFF/JPG/PNG/PDF)", type=["tif", "tiff", "jpg", "jpeg", "png", "pdf"], label_visibility="visible")
+def predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch):
+    if sc_patch is None or clf_patch is None:
+        return "❌ Not available", 0.0
+    patch_feats = []
+    # Extract patches, size 64x64, stride 64
+    for y in range(0, residual.shape[0] - 64 + 1, 64):
+        for x in range(0, residual.shape[1] - 64 + 1, 64):
+            p = residual[y:y+64, x:x+64]
+            lbp = lbp_hist_safe(p, 8, 1.0)
+            fft6 = fft_radial_energy(p, 6)
+            feat = np.concatenate([lbp, fft6], axis=0)
+            patch_feats.append(feat)
+    if not patch_feats:
+        return "❌ No patches", 0.0
+    X = np.array(patch_feats, np.float32)
+    expected_len = sc_patch.scale_.shape[0] if hasattr(sc_patch, "scale_") else None
+    if expected_len is not None and X.shape[1] != expected_len:
+        raise ValueError(f"Scaler expects {expected_len} features but input has {X.shape[1]}.")
+    Xs = sc_patch.transform(X)
+    p = clf_patch.predict_proba(Xs)[:, 1]
+    prob = float(np.mean(p))
+    thr = thr_patch.get("global", 0.5)
+    verdict = "🔴 Tampered" if prob >= thr else "🟢 Clean"
+    return verdict, prob
+
+uploaded = st.file_uploader("📁 Upload scanned page (TIF/TIFF/JPG/PNG/PDF)", type=["tif", "tiff", "jpg", "jpeg", "png", "pdf"])
 def safe_show_image(img_bgr):
     rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    st.image(rgb, use_column_width=True, caption="🖼️ Uploaded Image")
+    st.image(rgb, caption="🖼️ Uploaded Image", use_container_width=True)
 
 if uploaded:
     try:
         bgr, display_name = decode_upload_to_bgr(uploaded)
         residual = load_to_residual_from_bgr(bgr)
         label, conf = predict_scanner(residual)
-        col1, col2 = st.columns([1.1, 1.9], gap="large")
+        verdict, prob = predict_tamper_patch(residual, sc_patch, clf_patch, thr_patch)
+        col1, col2 = st.columns([1.6, 2.4], gap="medium")
         with col2:
             safe_show_image(bgr)
         with col1:
             st.markdown(
                 f"""
-                <div style='padding:22px;border-radius:12px;background:#1d2337;border:2px solid #6a7ff7;'>
-                    <div style='font-size:23px;color:#7B98EE;'>🖨️ Scanner</div>
+                <div style='padding:24px;border-radius:12px;background:#181929;border:2px solid #6a7ff7;'>
+                    <div style='font-size:22px;color:#7B98EE;'>🖨️ Scanner</div>
                     <div style='font-size:32px;margin-top:10px;font-weight:bold;'>{label}</div>
-                    <div style='font-size:16px;color:#fddcff;margin-top:12px;'>🎯 Confidence: <b>{conf:.1f}%</b></div>
+                    <div style='font-size:16px;color:#d7a6ff;margin-top:14px;'>🎯 Confidence: <b>{conf:.1f}%</b></div>
+                    <div style='font-size:24px;color:#febbbb;margin-top:16px;'>{verdict}</div>
+                    <div style='font-size:14px;color:#bbbbfe;margin-top:4px;'>Tamper Probability: <b>{prob:.3f}</b></div>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -149,4 +181,4 @@ if uploaded:
         st.error("🚨 Inference error")
         st.code(str(e))
 else:
-    st.info("🧭 Drag-and-drop or select a scanned image/PDF above to analyze.")
+    st.info("💡 Drag-and-drop or browse to upload and analyze.")
