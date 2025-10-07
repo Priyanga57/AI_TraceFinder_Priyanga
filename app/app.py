@@ -14,6 +14,7 @@ APP_TITLE = "🔍 TraceFinder — Scanner Identification & Tamper Detection 🕵
 IMG_SIZE = (256, 256)
 BASE_DIR = Path(__file__).resolve().parent
 
+# Streamlit page config and header
 st.set_page_config(page_title=APP_TITLE, page_icon="🔍", layout="wide")
 st.markdown(
     """
@@ -56,7 +57,8 @@ def decode_upload_to_bgr(uploaded):
     name = uploaded.name
     ext = os.path.splitext(name.lower())[-1]
     if ext == ".pdf":
-        return pdf_bytes_to_bgr(raw), name
+        bgr = pdf_bytes_to_bgr(raw)
+        return bgr, name
     buf = np.frombuffer(raw, np.uint8)
     bgr = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
     if bgr is None:
