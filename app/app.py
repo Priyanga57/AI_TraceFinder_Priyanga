@@ -15,17 +15,26 @@ IMG_SIZE = (256, 256)
 BASE_DIR = Path(__file__).resolve().parent
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🔍", layout="wide")
-
 st.markdown(
     """
-    <div style='text-align:center; padding-top:8px;'>
+    <div style='text-align:center; padding-top:16px;'>
         <h1>🔍 TraceFinder</h1>
         <h4 style='color:#6a7ff7;'>Scanner Identification & Tamper Detection 🖨️</h4>
-        <p style='color:#aaaaff; font-size:20px;'>Upload a scanned image or PDF 👇</p>
+        <p style='color:#aaaaff; font-size:20px;'>Upload a scanned image or PDF below 👇</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
+def corr2d(a, b):
+    a = a.astype(np.float32).ravel()
+    b = b.astype(np.float32).ravel()
+    a -= a.mean()
+    b -= b.mean()
+    d = np.linalg.norm(a) * np.linalg.norm(b)
+    if d == 0:
+        return 0.0
+    return float((a @ b) / d)
 
 def pdf_bytes_to_bgr(file_bytes: bytes):
     if not PYMUPDF_AVAILABLE:
@@ -39,14 +48,15 @@ def pdf_bytes_to_bgr(file_bytes: bytes):
     return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 def decode_upload_to_bgr(uploaded):
-    try: uploaded.seek(0)
-    except Exception: pass
+    try:
+        uploaded.seek(0)
+    except Exception:
+        pass
     raw = uploaded.read()
     name = uploaded.name
     ext = os.path.splitext(name.lower())[-1]
     if ext == ".pdf":
-        bgr = pdf_bytes_to_bgr(raw)
-        return bgr, name
+        return pdf_bytes_to_bgr(raw), name
     buf = np.frombuffer(raw, np.uint8)
     bgr = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
     if bgr is None:
